@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Classify images using CLIP zero-shot classification in your browser with Transformers.js and Backblaze B2 cloud storage. No server GPU needed.">
+    <title>B2 + CLIP Image Classifier</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='0.9em' font-size='90'>🔍</text></svg>">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: oklch(0.97 0.003 190);
+            color: oklch(0.16 0.02 190);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 24px;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            text-rendering: optimizeLegibility;
+        }
+
+        .container {
+            background: white;
+            border-radius: 12px;
+            border: 1px solid oklch(0.92 0.005 190);
+            box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+            max-width: 720px;
+            width: 100%;
+            padding: 32px;
+        }
+
+        h1 {
+            color: oklch(0.16 0.02 190);
+            margin-bottom: 6px;
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+            line-height: 1.2;
+        }
+
+        .subtitle {
+            color: oklch(0.44 0.02 190);
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            line-height: 1.4;
+        }
+
+        .info-box {
+            background: oklch(0.97 0.003 190);
+            border: 1px solid oklch(0.92 0.005 190);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            line-height: 1.6;
+            color: oklch(0.44 0.02 190);
+        }
+
+        .info-box strong {
+            color: oklch(0.16 0.02 190);
+        }
+
+        .upload-zone {
+            border: 2px dashed oklch(0.44 0.02 190 / 0.25);
+            border-radius: 8px;
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.15s, background-color 0.15s;
+            margin-bottom: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .upload-zone:hover {
+            border-color: oklch(0.44 0.17 190 / 0.5);
+            background: oklch(0.44 0.17 190 / 0.02);
+        }
+
+        .upload-zone:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px oklch(0.44 0.17 190 / 0.3);
+        }
+
+        .upload-zone.dragover {
+            border-color: oklch(0.44 0.17 190);
+            background: oklch(0.44 0.17 190 / 0.05);
+        }
+
+        .upload-zone.has-preview {
+            padding: 16px;
+        }
+
+        .upload-zone h3 {
+            font-size: 0.9375rem;
+            font-weight: 600;
+            color: oklch(0.16 0.02 190);
+        }
+
+        .upload-zone .upload-hint {
+            color: oklch(0.44 0.02 190);
+            margin-top: 8px;
+            font-size: 0.8125rem;
+        }
+
+        .upload-zone .upload-icon {
+            font-size: 2.5rem;
+            margin-bottom: 8px;
+            line-height: 1;
+        }
+
+        .upload-placeholder {
+            transition: opacity 0.2s;
+        }
+
+        .upload-zone.has-preview .upload-placeholder {
+            display: none;
+        }
+
+        .image-preview {
+            display: none;
+            max-width: 100%;
+            max-height: 280px;
+            border-radius: 6px;
+            object-fit: contain;
+        }
+
+        .upload-zone.has-preview .image-preview {
+            display: block;
+            margin: 0 auto;
+        }
+
+        .preview-filename {
+            display: none;
+            margin-top: 8px;
+            font-size: 0.8125rem;
+            color: oklch(0.44 0.02 190);
+        }
+
+        .upload-zone.has-preview .preview-filename {
+            display: block;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        .label-section {
+            margin-bottom: 20px;
+        }
+
+        .label-section label {
+            display: block;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: oklch(0.16 0.02 190);
+            margin-bottom: 8px;
+        }
+
+        .label-input {
+            width: 100%;
+            padding: 9px 12px;
+            border: 1px solid oklch(0.92 0.005 190);
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-family: inherit;
+            color: oklch(0.16 0.02 190);
+            transition: border-color 0.15s;
+        }
+
+        .label-input:focus {
+            outline: none;
+            border-color: oklch(0.44 0.17 190);
+            box-shadow: 0 0 0 3px oklch(0.44 0.17 190 / 0.15);
+        }
+
+        .label-input::placeholder {
+            color: oklch(0.44 0.02 190 / 0.6);
+        }
+
+        .preset-row {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .preset-btn {
+            background: oklch(0.97 0.003 190);
+            color: oklch(0.44 0.02 190);
+            border: 1px solid oklch(0.92 0.005 190);
+            padding: 5px 12px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+            margin: 0;
+        }
+
+        .preset-btn:hover {
+            background: oklch(0.44 0.17 190 / 0.08);
+            border-color: oklch(0.44 0.17 190 / 0.3);
+            color: oklch(0.30 0.10 190);
+        }
+
+        .preset-btn:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px oklch(0.44 0.17 190 / 0.3);
+        }
+
+        button.primary {
+            background: oklch(0.44 0.17 190);
+            color: white;
+            border: none;
+            padding: 9px 20px;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            font-family: inherit;
+            cursor: pointer;
+            transition: background-color 0.15s;
+            margin: 4px;
+        }
+
+        button.primary:hover:not(:disabled) {
+            background: oklch(0.38 0.17 190);
+        }
+
+        button.primary:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 3px oklch(0.44 0.17 190 / 0.3);
+        }
+
+        button.primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .status {
+            background: oklch(0.97 0.003 190);
+            border: 1px solid oklch(0.92 0.005 190);
+            padding: 12px 16px;
+            margin: 16px 0;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            display: none;
+        }
+
+        .status.show {
+            display: block;
+        }
+
+        .status.error {
+            background: oklch(0.97 0.01 25);
+            border-color: oklch(0.55 0.22 25 / 0.3);
+            color: oklch(0.45 0.18 25);
+        }
+
+        .status.success {
+            background: oklch(0.97 0.01 155);
+            border-color: oklch(0.58 0.15 155 / 0.3);
+            color: oklch(0.38 0.12 155);
+        }
+
+        .progress {
+            background: oklch(0.92 0.005 190);
+            border-radius: 999px;
+            height: 6px;
+            overflow: hidden;
+            margin: 12px 0;
+        }
+
+        .progress-bar {
+            background: oklch(0.44 0.17 190);
+            height: 100%;
+            width: 0%;
+            border-radius: 999px;
+            transition: width 0.3s;
+        }
+
+        .result {
+            background: oklch(0.97 0.003 190);
+            border: 1px solid oklch(0.92 0.005 190);
+            padding: 20px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result h3 {
+            color: oklch(0.16 0.02 190);
+            margin-bottom: 16px;
+            font-size: 0.9375rem;
+            font-weight: 600;
+        }
+
+        .result-content {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+
+        .result-thumbnail {
+            width: 120px;
+            min-width: 120px;
+            height: 120px;
+            border-radius: 6px;
+            object-fit: cover;
+            border: 1px solid oklch(0.92 0.005 190);
+        }
+
+        .chart-container {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .bar-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+        }
+
+        .bar-label {
+            width: 90px;
+            min-width: 90px;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            color: oklch(0.16 0.02 190);
+            text-align: right;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .bar-track {
+            flex: 1;
+            height: 22px;
+            background: oklch(0.92 0.005 190);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            background: oklch(0.44 0.17 190);
+            border-radius: 4px;
+            width: 0%;
+            transition: width 0.6s ease-out;
+        }
+
+        .bar-fill.top {
+            background: oklch(0.38 0.17 190);
+        }
+
+        .bar-score {
+            width: 48px;
+            min-width: 48px;
+            font-size: 0.8125rem;
+            font-weight: 600;
+            color: oklch(0.44 0.02 190);
+            text-align: left;
+        }
+
+        .result-footer {
+            margin-top: 16px;
+            padding-top: 16px;
+            border-top: 1px solid oklch(0.92 0.005 190);
+        }
+
+        .result-footer-label {
+            margin-bottom: 10px;
+            font-weight: 600;
+            font-size: 0.8125rem;
+            color: oklch(0.44 0.02 190);
+        }
+
+        .links {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .links a {
+            color: oklch(0.44 0.17 190);
+            text-decoration: none;
+            padding: 7px 14px;
+            border: 1px solid oklch(0.92 0.005 190);
+            border-radius: 6px;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            background: white;
+            transition: background-color 0.15s, border-color 0.15s;
+        }
+
+        .links a:hover {
+            background: oklch(0.97 0.003 190);
+            border-color: oklch(0.44 0.17 190 / 0.3);
+        }
+
+        .links-hint {
+            margin-top: 8px;
+            font-size: 0.75rem;
+            color: oklch(0.44 0.02 190);
+        }
+
+        .footer {
+            margin-top: 24px;
+            padding-top: 16px;
+            border-top: 1px solid oklch(0.92 0.005 190);
+            text-align: center;
+        }
+
+        .footer-label {
+            color: oklch(0.44 0.02 190);
+            font-size: 0.8125rem;
+            font-weight: 500;
+            margin-bottom: 8px;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .footer-links a {
+            color: oklch(0.44 0.17 190);
+            text-decoration: none;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            transition: color 0.15s;
+        }
+
+        .footer-links a:hover {
+            color: oklch(0.38 0.17 190);
+            text-decoration: underline;
+            text-underline-offset: 4px;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 1.25rem;
+            }
+            .upload-zone {
+                padding: 32px 16px;
+            }
+            .result-content {
+                flex-direction: column;
+                align-items: center;
+            }
+            .result-thumbnail {
+                width: 160px;
+                height: 160px;
+            }
+            .bar-label {
+                width: 70px;
+                min-width: 70px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>B2 + CLIP Image Classifier</h1>
+        <p class="subtitle">Client-side Zero-Shot Image Classification using Transformers.js + Backblaze B2</p>
+
+        <div class="info-box">
+            <p>
+                <strong>What this demonstrates:</strong><br>
+                &bull; <strong>Transformers.js</strong> &mdash; Run OpenAI's CLIP model entirely in your browser (no server GPU needed)<br>
+                &bull; <strong>Backblaze B2</strong> &mdash; Cost-effective cloud storage with S3-compatible API<br>
+                &bull; <strong>Pre-signed URLs</strong> &mdash; Secure direct browser-to-cloud uploads without exposing credentials
+            </p>
+            <p style="margin-top: 8px;">Everything runs client-side. Your images never touch our server for classification.</p>
+        </div>
+
+        <div class="upload-zone" id="uploadZone" role="button" tabindex="0" aria-label="Upload image file. Drop a file here or press Enter to browse.">
+            <div class="upload-placeholder">
+                <div class="upload-icon">🖼️</div>
+                <h3>Drop image here or click to browse</h3>
+                <p class="upload-hint">Supports: JPG, PNG, GIF, WebP, BMP</p>
+            </div>
+            <img class="image-preview" id="imagePreview" alt="Image preview">
+            <p class="preview-filename" id="previewFilename"></p>
+            <input type="file" id="fileInput" accept="image/*">
+        </div>
+
+        <div class="label-section">
+            <label for="labelInput">Classification Labels</label>
+            <input type="text" class="label-input" id="labelInput" placeholder="Enter comma-separated labels, e.g. cat, dog, bird">
+            <div class="preset-row">
+                <button class="preset-btn" data-labels="cat, dog, bird, fish, horse, elephant, bear, zebra, giraffe">Animals</button>
+                <button class="preset-btn" data-labels="car, truck, bicycle, motorcycle, airplane, boat, train, bus">Vehicles</button>
+                <button class="preset-btn" data-labels="pizza, sushi, burger, salad, cake, coffee, wine, fruit">Food &amp; Drink</button>
+                <button class="preset-btn" data-labels="beach, mountain, city, forest, desert, ocean, sunset, snow">Scenes</button>
+            </div>
+        </div>
+
+        <div style="text-align: center;">
+            <button class="primary" id="classifyBtn" disabled>Classify with CLIP</button>
+        </div>
+
+        <div class="status" id="status" role="status" aria-live="polite"></div>
+
+        <div class="progress" id="progressContainer" style="display: none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="progress-bar" id="progressBar"></div>
+        </div>
+
+        <div class="result" id="result">
+            <h3>Classification Results</h3>
+            <div class="result-content">
+                <img class="result-thumbnail" id="resultThumbnail" alt="Classified image">
+                <div class="chart-container" id="chartContainer"></div>
+            </div>
+
+            <div class="result-footer">
+                <p class="result-footer-label">Files stored in Backblaze B2:</p>
+                <div class="links">
+                    <a id="imageLink" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center;">View Image</a>
+                    <a id="resultLink" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center;">View Result JSON</a>
+                </div>
+                <p class="links-hint">
+                    Click links above to access your files (pre-signed URLs valid for 1 hour)
+                </p>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p class="footer-label">Learn more</p>
+            <div class="footer-links">
+                <a href="https://huggingface.co/docs/transformers.js" target="_blank" rel="noopener noreferrer">Transformers.js Docs</a>
+                <a href="https://www.backblaze.com/b2/cloud-storage.html" target="_blank" rel="noopener noreferrer">Backblaze B2 Storage</a>
+                <a href="https://github.com/xenova/transformers.js" target="_blank" rel="noopener noreferrer">Transformers.js GitHub</a>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { pipeline } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+        let selectedFile = null;
+        let imageUrl = null;
+        let imageObjectUrl = null;
+        let fileId = null;
+        let clipPipeline = null;
+        let imageUploaded = false;
+
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const imagePreview = document.getElementById('imagePreview');
+        const previewFilename = document.getElementById('previewFilename');
+        const labelInput = document.getElementById('labelInput');
+        const classifyBtn = document.getElementById('classifyBtn');
+        const statusEl = document.getElementById('status');
+        const progressContainer = document.getElementById('progressContainer');
+        const progressBar = document.getElementById('progressBar');
+        const result = document.getElementById('result');
+
+        // API is served from same origin
+        const API_BASE = window.location.origin;
+
+        // Max file size (10 MB)
+        const MAX_FILE_SIZE = 10 * 1024 * 1024;
+
+        // Named progress constants
+        const PROGRESS = {
+            UPLOAD_START: 10,
+            PRESIGN_DONE: 30,
+            UPLOAD_DONE: 50,
+            MODEL_LOADING: 60,
+            CLASSIFYING: 70,
+            SAVING: 90,
+            COMPLETE: 100,
+        };
+
+        // Preset button handlers
+        document.querySelectorAll('.preset-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                labelInput.value = btn.dataset.labels;
+                labelInput.dispatchEvent(new Event('input'));
+            });
+        });
+
+        // Enable classify button when both image uploaded and labels entered
+        function updateClassifyButton() {
+            const hasLabels = labelInput.value.trim().split(',').filter(l => l.trim()).length >= 2;
+            classifyBtn.disabled = !(imageUploaded && hasLabels);
+        }
+
+        labelInput.addEventListener('input', updateClassifyButton);
+
+        // Fetch with timeout via AbortController
+        function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeoutMs);
+            return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(id));
+        }
+
+        // Use classList for status type safety
+        function showStatus(message, type = 'info') {
+            statusEl.textContent = message;
+            statusEl.classList.remove('error', 'success');
+            if (type === 'error' || type === 'success') {
+                statusEl.classList.add(type);
+            }
+            statusEl.classList.add('show');
+        }
+
+        function setProgress(percent) {
+            progressContainer.style.display = 'block';
+            progressBar.style.width = percent + '%';
+            progressContainer.setAttribute('aria-valuenow', percent);
+        }
+
+        function hideProgress() {
+            progressContainer.style.display = 'none';
+        }
+
+        // File upload handling
+        uploadZone.addEventListener('click', () => fileInput.click());
+
+        // Keyboard handler for upload zone
+        uploadZone.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                fileInput.click();
+            }
+        });
+
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFileSelect(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        async function handleFileSelect(file) {
+            if (!file.type.startsWith('image/')) {
+                showStatus('Please select an image file', 'error');
+                return;
+            }
+
+            // File size validation
+            if (file.size > MAX_FILE_SIZE) {
+                showStatus('File too large. Maximum size is 10 MB.', 'error');
+                return;
+            }
+
+            selectedFile = file;
+
+            // Show image preview
+            if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
+            imageObjectUrl = URL.createObjectURL(file);
+            imagePreview.src = imageObjectUrl;
+            previewFilename.textContent = `${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
+            uploadZone.classList.add('has-preview');
+
+            showStatus(`Selected: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'success');
+
+            // Upload to B2 immediately
+            await uploadToB2();
+        }
+
+        async function uploadToB2() {
+            try {
+                showStatus('Uploading image to B2...', 'info');
+                setProgress(PROGRESS.UPLOAD_START);
+
+                // Get pre-signed URL for image
+                const response = await fetchWithTimeout(`${API_BASE}/api/presign-image`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filename: selectedFile.name,
+                        contentType: selectedFile.type
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error('Failed to get pre-signed URL');
+                }
+
+                const { uploadUrl, publicUrl, fileId: id } = await response.json();
+                fileId = id;
+
+                setProgress(PROGRESS.PRESIGN_DONE);
+
+                // Upload image to B2 (120s timeout for large files)
+                const uploadResponse = await fetchWithTimeout(uploadUrl, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': selectedFile.type },
+                    body: selectedFile
+                }, 120000);
+
+                if (!uploadResponse.ok) {
+                    throw new Error('Failed to upload image to B2');
+                }
+
+                imageUrl = publicUrl;
+                imageUploaded = true;
+                setProgress(PROGRESS.UPLOAD_DONE);
+                showStatus('Image uploaded to B2 successfully!', 'success');
+                hideProgress();
+                updateClassifyButton();
+
+            } catch (error) {
+                console.error('Upload error:', error);
+                const msg = error.name === 'AbortError' ? 'Upload timed out' : 'Error uploading to B2: ' + error.message;
+                showStatus(msg, 'error');
+                hideProgress();
+            }
+        }
+
+        function parseLabels() {
+            return labelInput.value
+                .split(',')
+                .map(l => l.trim())
+                .filter(l => l.length > 0);
+        }
+
+        function renderBarChart(classifications) {
+            const container = document.getElementById('chartContainer');
+            container.innerHTML = '';
+
+            const topScore = classifications[0]?.score || 0;
+
+            classifications.forEach((item, i) => {
+                const pct = (item.score * 100).toFixed(1);
+                const row = document.createElement('div');
+                row.className = 'bar-row';
+
+                row.innerHTML = `
+                    <span class="bar-label" title="${item.label}">${item.label}</span>
+                    <div class="bar-track">
+                        <div class="bar-fill${i === 0 ? ' top' : ''}" style="width: 0%"></div>
+                    </div>
+                    <span class="bar-score">${pct}%</span>
+                `;
+
+                container.appendChild(row);
+
+                // Animate bar fill
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        row.querySelector('.bar-fill').style.width = pct + '%';
+                    });
+                });
+            });
+        }
+
+        classifyBtn.addEventListener('click', async () => {
+            const labels = parseLabels();
+            if (labels.length < 2) {
+                showStatus('Please enter at least 2 labels separated by commas', 'error');
+                return;
+            }
+
+            try {
+                classifyBtn.disabled = true;
+                result.classList.remove('show');
+                showStatus('Loading CLIP model (first time may take a few minutes)...', 'info');
+                setProgress(PROGRESS.MODEL_LOADING);
+
+                // Load CLIP model
+                if (!clipPipeline) {
+                    clipPipeline = await pipeline(
+                        'zero-shot-image-classification',
+                        'Xenova/clip-vit-base-patch32'
+                    );
+                }
+
+                setProgress(PROGRESS.CLASSIFYING);
+                showStatus('Classifying image...', 'info');
+
+                // Classify image using the local object URL
+                const classifications = await clipPipeline(imageObjectUrl, labels);
+
+                setProgress(PROGRESS.SAVING);
+                showStatus('Saving results to B2...', 'info');
+
+                // Get pre-signed URL for result
+                const presignResponse = await fetchWithTimeout(`${API_BASE}/api/presign-result`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ fileId })
+                });
+
+                if (!presignResponse.ok) {
+                    throw new Error('Failed to get result pre-signed URL');
+                }
+
+                const { uploadUrl: resultUploadUrl, publicUrl: resultPublicUrl } = await presignResponse.json();
+
+                // Upload result to B2
+                const resultData = {
+                    imageSource: imageUrl,
+                    filename: selectedFile.name,
+                    labels: labels,
+                    classifications: classifications,
+                    model: 'Xenova/clip-vit-base-patch32',
+                    timestamp: new Date().toISOString()
+                };
+
+                const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(resultData)
+                }, 120000);
+
+                if (!resultUploadResponse.ok) {
+                    throw new Error('Failed to upload results to B2');
+                }
+
+                setProgress(PROGRESS.COMPLETE);
+                showStatus('Classification complete!', 'success');
+
+                // Display results
+                document.getElementById('resultThumbnail').src = imageObjectUrl;
+                renderBarChart(classifications);
+                document.getElementById('imageLink').href = imageUrl;
+                document.getElementById('resultLink').href = resultPublicUrl;
+                result.classList.add('show');
+
+                hideProgress();
+                classifyBtn.disabled = false;
+
+            } catch (error) {
+                console.error('Classification error:', error);
+                const msg = error.name === 'AbortError' ? 'Request timed out' : 'Error during classification: ' + error.message;
+                showStatus(msg, 'error');
+                hideProgress();
+                classifyBtn.disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

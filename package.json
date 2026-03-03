@@ -1,0 +1,24 @@
+{
+  "name": "b2-zeroshot-image-classifier",
+  "version": "1.0.0",
+  "description": "Client-side Zero-Shot Image Classification with CLIP and Backblaze B2",
+  "scripts": {
+    "install:backend": "cd backend && npm install",
+    "start:backend": "cd backend && npm start",
+    "dev:backend": "cd backend && npm run dev",
+    "start:frontend": "cd frontend && python3 -m http.server 8080",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f"
+  },
+  "keywords": ["clip", "zero-shot", "image-classification", "computer-vision", "transformers-js", "webassembly", "backblaze", "b2", "s3", "cloud-storage", "javascript", "client-side-ai", "browser-ai"],
+  "author": "Backblaze",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backblaze-b2-samples/b2-zeroshot-image-classifier"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
