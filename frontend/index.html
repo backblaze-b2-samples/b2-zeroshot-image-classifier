@@ -168,6 +168,13 @@
             margin-bottom: 8px;
         }
 
+        .label-hint {
+            font-size: 0.8125rem;
+            color: oklch(0.44 0.02 190);
+            margin-bottom: 8px;
+            line-height: 1.4;
+        }
+
         .label-input {
             width: 100%;
             padding: 9px 12px;
@@ -509,7 +516,8 @@
 
         <div class="label-section">
             <label for="labelInput">Classification Labels</label>
-            <input type="text" class="label-input" id="labelInput" placeholder="Enter comma-separated labels, e.g. cat, dog, bird">
+            <p class="label-hint">CLIP scores your image against each label below (two or more required). Edit them or pick a preset to customize what the model looks for.</p>
+            <input type="text" class="label-input" id="labelInput" value="cat, dog, bird, car, person, food, building, landscape, flower, art" placeholder="Enter comma-separated labels, e.g. cat, dog, bird">
             <div class="preset-row">
                 <button class="preset-btn" data-labels="cat, dog, bird, fish, horse, elephant, bear, zebra, giraffe">Animals</button>
                 <button class="preset-btn" data-labels="car, truck, bicycle, motorcycle, airplane, boat, train, bus">Vehicles</button>
