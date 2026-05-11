@@ -4,6 +4,8 @@ A JavaScript example app that runs [OpenAI's CLIP](https://openai.com/research/c
 
 Upload an image (JPG, PNG, GIF, WebP, BMP), provide custom labels, classify it with CLIP client-side, and save both the image and results to S3-compatible Backblaze B2 object storage — all from a single-page web app.
 
+![alt text](docs/classification-example.png)
+
 ## Why Client-Side CLIP?
 
 - **No GPU server costs** — the CLIP model runs in your browser via WebAssembly, so there's no inference server to provision or pay for
