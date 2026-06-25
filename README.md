@@ -260,7 +260,7 @@ Response:
   "publicUrl": "https://...",
   "urlType": "signed",
   "expiresIn": 3600,
-  "key": "results/uuid/result-uuid.json"
+  "key": "results/<fileId>/<randomUUID>.json"
 }
 ```
 

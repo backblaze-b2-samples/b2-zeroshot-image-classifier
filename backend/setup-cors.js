@@ -1,5 +1,7 @@
 import { PutBucketCorsCommand, GetBucketCorsCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
+import path from 'path';
+import { pathToFileURL } from 'url';
 import { createB2S3Client } from './b2-config.js';
 
 dotenv.config();
@@ -135,6 +137,6 @@ export async function setupCORS(silent = false) {
 }
 
 // Run if called directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   setupCORS();
 }
