@@ -5,7 +5,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 import { randomBytes, randomUUID } from 'crypto';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { buildPublicUrl, createB2S3Client } from './b2-config.js';
 import { setupCORS } from './setup-cors.js';
 
@@ -38,6 +38,7 @@ const { s3Client, bucketName: BUCKET, publicUrlBase: PUBLIC_URL_BASE } = b2;
 
 // Configurable URL expiry
 const URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
+const MAX_RESULT_UPLOAD_TOKENS = Math.max(1, parseInt(process.env.MAX_RESULT_UPLOAD_TOKENS, 10) || 1000);
 const resultUploadTokens = new Map();
 
 // Robust boolean parsing for AUTO_SETUP_CORS
@@ -57,17 +58,26 @@ function cleanupExpiredResultTokens(now = Date.now()) {
   }
 }
 
-function issueResultUploadToken(fileId) {
+function trimResultUploadTokens() {
   cleanupExpiredResultTokens();
+  while (resultUploadTokens.size >= MAX_RESULT_UPLOAD_TOKENS) {
+    const oldestToken = resultUploadTokens.keys().next().value;
+    resultUploadTokens.delete(oldestToken);
+  }
+}
+
+function issueResultUploadToken(fileId) {
+  trimResultUploadTokens();
   const resultUploadToken = randomBytes(32).toString('base64url');
   resultUploadTokens.set(resultUploadToken, {
     fileId,
     expiresAt: Date.now() + URL_EXPIRY * 1000,
+    pending: false,
   });
   return resultUploadToken;
 }
 
-function consumeResultUploadToken(fileId, resultUploadToken) {
+function reserveResultUploadToken(fileId, resultUploadToken) {
   cleanupExpiredResultTokens();
 
   if (!resultUploadToken || typeof resultUploadToken !== 'string') {
@@ -75,12 +85,23 @@ function consumeResultUploadToken(fileId, resultUploadToken) {
   }
 
   const record = resultUploadTokens.get(resultUploadToken);
-  if (!record || record.fileId !== fileId) {
+  if (!record || record.pending || record.fileId !== fileId) {
     return false;
   }
 
-  resultUploadTokens.delete(resultUploadToken);
+  record.pending = true;
   return true;
+}
+
+function consumeResultUploadToken(resultUploadToken) {
+  resultUploadTokens.delete(resultUploadToken);
+}
+
+function releaseResultUploadToken(resultUploadToken) {
+  const record = resultUploadTokens.get(resultUploadToken);
+  if (record) {
+    record.pending = false;
+  }
 }
 
 // Shared presign helper
@@ -151,14 +172,20 @@ app.post('/api/presign-result', async (req, res) => {
       return res.status(400).json({ error: 'Invalid file ID' });
     }
 
-    if (!consumeResultUploadToken(fileId, resultUploadToken)) {
+    if (!reserveResultUploadToken(fileId, resultUploadToken)) {
       return res.status(403).json({ error: 'Invalid or expired result upload token' });
     }
 
-    const key = `results/${fileId}.json`;
-    const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
+    try {
+      const key = `results/${fileId}.json`;
+      const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
+      consumeResultUploadToken(resultUploadToken);
 
-    res.json({ uploadUrl, publicUrl, urlType, expiresIn, key });
+      res.json({ uploadUrl, publicUrl, urlType, expiresIn, key });
+    } catch (error) {
+      releaseResultUploadToken(resultUploadToken);
+      throw error;
+    }
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -221,6 +248,6 @@ export async function startServer() {
   process.on('SIGINT', shutdown);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   startServer();
 }

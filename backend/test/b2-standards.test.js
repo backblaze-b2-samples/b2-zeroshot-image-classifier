@@ -16,6 +16,7 @@ const MANAGED_ENV_KEYS = [
   'B2_BUCKET',
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
+  'MAX_RESULT_UPLOAD_TOKENS',
   'PORT',
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
@@ -28,6 +29,7 @@ process.env.B2_BUCKET_NAME = 'server-bucket';
 process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
+process.env.MAX_RESULT_UPLOAD_TOKENS = '4';
 
 const { app } = await import('../server.js');
 
@@ -204,4 +206,20 @@ test('presign-result consumes issued result upload tokens', async () => {
 
   assert.equal(replay.status, 403);
   assertNoPresignUrls(replay.body);
+});
+
+test('presign-image evicts oldest result upload tokens at the cap', async () => {
+  const first = await issueImageToken('cap-1.jpg');
+  await issueImageToken('cap-2.jpg');
+  await issueImageToken('cap-3.jpg');
+  await issueImageToken('cap-4.jpg');
+  await issueImageToken('cap-5.jpg');
+
+  const response = await postJson('/api/presign-result', {
+    fileId: first.fileId,
+    resultUploadToken: first.resultUploadToken,
+  });
+
+  assert.equal(response.status, 403);
+  assertNoPresignUrls(response.body);
 });
