@@ -1,11 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { buildPublicUrl, createB2S3Client } from './b2-config.js';
 import { setupCORS } from './setup-cors.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -13,11 +14,11 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
-// Validate required env vars at startup
-const REQUIRED_ENV = ['B2_ENDPOINT', 'B2_KEY_ID', 'B2_APP_KEY', 'B2_BUCKET'];
-const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
-if (missing.length > 0) {
-  console.error(`Missing required environment variables: ${missing.join(', ')}`);
+let b2;
+try {
+  b2 = createB2S3Client();
+} catch (error) {
+  console.error(error.message);
   console.error('Copy backend/.env.example to backend/.env and fill in your credentials.');
   process.exit(1);
 }
@@ -33,18 +34,7 @@ app.use(express.json({ limit: '1kb' }));
 // Serve frontend files
 app.use(express.static(path.join(__dirname, '../frontend')));
 
-const s3Client = new S3Client({
-  endpoint: process.env.B2_ENDPOINT,
-  region: process.env.B2_REGION || 'us-west-002',
-  credentials: {
-    accessKeyId: process.env.B2_KEY_ID,
-    secretAccessKey: process.env.B2_APP_KEY,
-  },
-  forcePathStyle: true,
-  customUserAgent: "b2ai-clip-classifier",
-});
-
-const BUCKET = process.env.B2_BUCKET;
+const { s3Client, bucketName: BUCKET, publicUrlBase: PUBLIC_URL_BASE } = b2;
 
 // Configurable URL expiry
 const URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
@@ -65,12 +55,12 @@ async function generatePresignedUrls(key, contentType) {
     new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
     { expiresIn: URL_EXPIRY }
   );
-  const getUrl = await getSignedUrl(
+  const publicUrl = buildPublicUrl(PUBLIC_URL_BASE, key) || await getSignedUrl(
     s3Client,
     new GetObjectCommand({ Bucket: BUCKET, Key: key }),
     { expiresIn: URL_EXPIRY }
   );
-  return { uploadUrl: putUrl, publicUrl: getUrl };
+  return { uploadUrl: putUrl, publicUrl };
 }
 
 // Generate pre-signed PUT URL for image upload

@@ -73,14 +73,14 @@ cp .env.example .env
 Edit `.env` with your [B2 credentials](https://www.backblaze.com/docs/cloud-storage-enable-backblaze-b2?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples):
 
 ```env
-B2_ENDPOINT=https://s3.us-west-002.backblazeb2.com
-B2_REGION=us-west-002
-B2_KEY_ID=your_key_id_here
-B2_APP_KEY=your_app_key_here
-B2_BUCKET=your-bucket-name
+B2_REGION=your_b2_region
+B2_APPLICATION_KEY_ID=your_application_key_id
+B2_APPLICATION_KEY=your_application_key
+B2_BUCKET_NAME=your-bucket-name
+B2_PUBLIC_URL_BASE=
 ```
 
-> Get your B2 endpoint and region from your [bucket details page](https://secure.backblaze.com/b2_buckets.htm?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
+> Set `B2_REGION` from your bucket details page. The app derives the S3-compatible endpoint as `https://s3.<B2_REGION>.backblazeb2.com`. Set `B2_PUBLIC_URL_BASE` only when your bucket is public or fronted by a CDN; otherwise the app returns pre-signed download URLs.
 
 ### 3. Start the App
 
@@ -260,7 +260,7 @@ This example uses the [Xenova/clip-vit-base-patch32](https://huggingface.co/Xeno
 ### Storage
 
 - **Provider**: [Backblaze B2](https://www.backblaze.com/b2/cloud-storage.html?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
-- **API**: S3-compatible API with pre-signed URLs
+- **API**: S3-compatible API with pre-signed URLs and a custom sample user agent
 - **Pricing**: $6/TB/month storage, uploads are FREE
 - **Documentation**: [B2 S3-Compatible API Docs](https://www.backblaze.com/b2/docs/s3_compatible_api.html?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
 
