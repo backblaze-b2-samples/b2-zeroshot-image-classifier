@@ -51,7 +51,7 @@ test('rejects invalid or mismatched image content types', () => {
 });
 
 test('presigned PUT URL signs the required content-type header', async () => {
-  const { uploadUrl, uploadHeaders } = await generatePresignedUrls({
+  const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls({
     s3Client: createClient(),
     bucket: 'bucket-name',
     key: 'images/id.jpg',
@@ -61,6 +61,7 @@ test('presigned PUT URL signs the required content-type header', async () => {
   });
 
   assert.deepEqual(getSignedHeaders(uploadUrl), ['content-type', 'host']);
+  assert.deepEqual(getSignedHeaders(publicUrl), ['host']);
   assert.deepEqual(uploadHeaders, { 'Content-Type': 'image/jpeg' });
 });
 
@@ -89,6 +90,7 @@ test('mismatched PUT content type cannot reuse the presigned signature', async (
     });
 
     assert.deepEqual(getSignedHeaders(signedUpload.uploadUrl), ['content-type', 'host']);
+    assert.deepEqual(getSignedHeaders(signedUpload.publicUrl), ['host']);
     assert.notEqual(getSignature(signedUpload.uploadUrl), getSignature(activeContentUpload.uploadUrl));
   }
 });

@@ -70,10 +70,7 @@ export async function generatePresignedUrls({
     throw new Error('contentType is required for presigned uploads');
   }
 
-  const signOptions = {
-    expiresIn,
-    signableHeaders: new Set(['content-type']),
-  };
+  const signOptions = { expiresIn };
   if (signingDate) {
     signOptions.signingDate = signingDate;
   }
@@ -81,7 +78,7 @@ export async function generatePresignedUrls({
   const putUrl = await getSignedUrl(
     s3Client,
     new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
-    signOptions
+    { ...signOptions, signableHeaders: new Set(['content-type']) }
   );
   const getUrl = await getSignedUrl(
     s3Client,
