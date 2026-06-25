@@ -21,7 +21,7 @@ export async function setupCORS(silent = false) {
   try {
     b2 = createB2S3Client();
   } catch (error) {
-    console.error('❌ Missing required environment variables!');
+    console.error('❌ Invalid B2 environment configuration!');
     console.error(error.message);
     console.error('Copy .env.example to .env and fill in your B2 credentials.');
     if (!silent) {
