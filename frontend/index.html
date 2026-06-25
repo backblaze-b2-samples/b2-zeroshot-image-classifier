@@ -612,10 +612,10 @@
             });
         });
 
-        // Enable classify button when both image uploaded and labels entered
+        // Enable classify button only while the uploaded image still has a result upload token.
         function updateClassifyButton() {
             const hasLabels = labelInput.value.trim().split(',').filter(l => l.trim()).length >= 2;
-            classifyBtn.disabled = !(imageUploaded && hasLabels);
+            classifyBtn.disabled = !(imageUploaded && resultUploadToken && hasLabels);
         }
 
         labelInput.addEventListener('input', updateClassifyButton);
@@ -850,6 +850,8 @@
                     uploadUrl: resultUploadUrl,
                     publicUrl: resultPublicUrl
                 } = await presignResponse.json();
+                resultUploadToken = null;
+                updateClassifyButton();
 
                 // Upload result to B2
                 const resultData = {
@@ -871,7 +873,6 @@
                     throw new Error('Failed to upload results to B2');
                 }
 
-                resultUploadToken = null;
                 setProgress(PROGRESS.COMPLETE);
                 showStatus('Classification complete!', 'success');
 
@@ -883,14 +884,14 @@
                 result.classList.add('show');
 
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
 
             } catch (error) {
                 console.error('Classification error:', error);
                 const msg = error.name === 'AbortError' ? 'Request timed out' : 'Error during classification: ' + error.message;
                 showStatus(msg, 'error');
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
             }
         });
     </script>
