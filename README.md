@@ -78,6 +78,7 @@ B2_APPLICATION_KEY_ID=your_application_key_id
 B2_APPLICATION_KEY=your_application_key
 B2_BUCKET_NAME=your-bucket-name
 B2_PUBLIC_URL_BASE=
+MAX_RESULT_UPLOAD_TOKENS=1000
 ```
 
 > Set `B2_REGION` from your bucket details page. The app derives the S3-compatible endpoint as `https://s3.<B2_REGION>.backblazeb2.com`. Set `B2_PUBLIC_URL_BASE` only when your bucket is public or fronted by a CDN; otherwise the app returns pre-signed download URLs.
@@ -241,7 +242,7 @@ Response:
 }
 ```
 
-`resultUploadToken` is a signed token required when requesting the matching result upload URL.
+`resultUploadToken` is a one-time signed token required when requesting the matching result upload URL. During the migration window, callers that omit `resultUploadToken` can still request one legacy result upload URL for a `fileId` issued by `/api/presign-image`; that fallback returns `results/<fileId>.json` and a deprecation notice.
 
 ### POST /api/presign-result
 
@@ -265,7 +266,7 @@ Response:
 ```
 
 `urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
-Each result upload URL uses a new server-issued object key under the token's `fileId`, so browser clients can upload with only the `Content-Type: application/json` header and do not need forbidden conditional request headers.
+Each token-based result upload URL uses a new server-issued object key under the token's `fileId`, so browser clients can upload with only the `Content-Type: application/json` header and do not need forbidden conditional request headers. A result upload token can be exchanged only once.
 
 ## Technical Details
 

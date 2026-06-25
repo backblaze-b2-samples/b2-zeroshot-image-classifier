@@ -17,8 +17,8 @@ const PLACEHOLDER_VALUES = new Set([
   'your_region',
 ]);
 
-const SAMPLE_USER_AGENT = 'b2ai-clip-classifier/1.0.0 backblaze-b2-samples';
 const SAMPLE_USER_AGENT_MARKER = '(backblaze-b2-samples)';
+const SAMPLE_USER_AGENT = `b2ai-clip-classifier/1.0.0 ${SAMPLE_USER_AGENT_MARKER}`;
 const LEGACY_ENDPOINT_ENV = 'B2_ENDPOINT';
 const warnedEnvVars = new Set();
 
@@ -121,6 +121,7 @@ function addBackblazeUserAgentMarker(s3Client) {
     (next) => async (args) => {
       const { request } = args;
       if (request?.headers) {
+        // AWS SDK customUserAgent sanitizes parentheses, so append the marker after the SDK builds the header.
         const userAgent = request.headers['user-agent'] || '';
         if (!userAgent.includes(SAMPLE_USER_AGENT_MARKER)) {
           request.headers['user-agent'] = `${userAgent} ${SAMPLE_USER_AGENT_MARKER}`.trim();

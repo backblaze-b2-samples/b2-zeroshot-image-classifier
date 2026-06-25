@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
@@ -16,6 +17,7 @@ const MANAGED_ENV_KEYS = [
   'B2_BUCKET',
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
+  'MAX_RESULT_UPLOAD_TOKENS',
   'PORT',
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
@@ -29,7 +31,7 @@ process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
 
-const { app } = await import('../server.js');
+const { app, createApp } = await import('../server.js');
 
 async function withEnv(values, fn) {
   const previous = new Map(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -56,6 +58,22 @@ function assertNoPresignUrls(body) {
   assert.equal(body.uploadUrl, undefined);
   assert.equal(body.publicUrl, undefined);
 }
+
+test('server module imports without configured B2 env', () => {
+  const env = { ...process.env };
+  for (const key of MANAGED_ENV_KEYS) {
+    delete env[key];
+  }
+
+  const result = spawnSync(
+    process.execPath,
+    ['-e', "import('./server.js').then(() => process.stdout.write('ok'))"],
+    { cwd: new URL('..', import.meta.url), env, encoding: 'utf8' }
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'ok');
+});
 
 test('B2 config accepts legacy env names during migration', async () => {
   await withEnv({
@@ -139,7 +157,11 @@ test.after(async () => {
 });
 
 async function postJson(path, body) {
-  const response = await fetch(`${baseUrl}${path}`, {
+  return postJsonTo(baseUrl, path, body);
+}
+
+async function postJsonTo(targetBaseUrl, path, body) {
+  const response = await fetch(`${targetBaseUrl}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -149,6 +171,19 @@ async function postJson(path, body) {
     status: response.status,
     body: await response.json(),
   };
+}
+
+async function withStartedApp(testApp, fn) {
+  const testServer = testApp.listen(0, '127.0.0.1');
+  await once(testServer, 'listening');
+  const { port } = testServer.address();
+
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    testServer.close();
+    await once(testServer, 'close');
+  }
 }
 
 async function issueImageToken(filename = 'photo.jpg') {
@@ -162,10 +197,52 @@ async function issueImageToken(filename = 'photo.jpg') {
   return response.body;
 }
 
+test('presign-image rejects active or mismatched image content types', async () => {
+  const svgResponse = await postJson('/api/presign-image', {
+    filename: 'photo.jpg',
+    contentType: 'image/svg+xml',
+  });
+  const mismatchResponse = await postJson('/api/presign-image', {
+    filename: 'photo.jpg',
+    contentType: 'image/png',
+  });
+
+  assert.equal(svgResponse.status, 400);
+  assert.equal(mismatchResponse.status, 400);
+  assertNoPresignUrls(svgResponse.body);
+  assertNoPresignUrls(mismatchResponse.body);
+});
+
+test('presign-image enforces pending result token quota', async () => {
+  await withStartedApp(createApp({ maxResultUploadTokens: 1 }), async (targetBaseUrl) => {
+    const first = await postJsonTo(targetBaseUrl, '/api/presign-image', {
+      filename: 'first.jpg',
+      contentType: 'image/jpeg',
+    });
+    const second = await postJsonTo(targetBaseUrl, '/api/presign-image', {
+      filename: 'second.jpg',
+      contentType: 'image/jpeg',
+    });
+
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 429);
+    assertNoPresignUrls(second.body);
+  });
+});
+
 test('presign-result rejects an unknown result upload token', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: '00000000-0000-4000-8000-000000000000',
     resultUploadToken: 'not-issued',
+  });
+
+  assert.equal(response.status, 403);
+  assertNoPresignUrls(response.body);
+});
+
+test('presign-result rejects an unknown legacy fileId-only request', async () => {
+  const response = await postJson('/api/presign-result', {
+    fileId: '00000000-0000-4000-8000-000000000000',
   });
 
   assert.equal(response.status, 403);
@@ -200,7 +277,29 @@ test('presign-result accepts a valid signed result upload token', async () => {
   assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', success.body.key)}`);
 });
 
-test('presign-result returns unique browser-compatible result keys', async () => {
+test('presign-result accepts a legacy fileId-only request once', async () => {
+  const image = await issueImageToken();
+  const success = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+  });
+  const replay = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+  });
+  const tokenReplay = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+    resultUploadToken: image.resultUploadToken,
+  });
+
+  assert.equal(success.status, 200);
+  assert.equal(success.body.key, `results/${image.fileId}.json`);
+  assert.equal(success.body.deprecation, 'resultUploadToken will be required in a future release');
+  assert.equal(replay.status, 403);
+  assert.equal(tokenReplay.status, 403);
+  assertNoPresignUrls(replay.body);
+  assertNoPresignUrls(tokenReplay.body);
+});
+
+test('presign-result rejects replayed result upload tokens', async () => {
   const image = await issueImageToken();
   const first = await postJson('/api/presign-result', {
     fileId: image.fileId,
@@ -212,12 +311,10 @@ test('presign-result returns unique browser-compatible result keys', async () =>
   });
 
   assert.equal(first.status, 200);
-  assert.equal(second.status, 200);
+  assert.equal(second.status, 403);
   assert.equal(first.body.uploadHeaders, undefined);
-  assert.equal(second.body.uploadHeaders, undefined);
-  assert.notEqual(first.body.key, second.body.key);
+  assertNoPresignUrls(second.body);
   assert.match(first.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
-  assert.match(second.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
 });
 
 test('presign-result rejects a tampered signed result upload token', async () => {
