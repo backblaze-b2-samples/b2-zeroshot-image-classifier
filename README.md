@@ -223,10 +223,16 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "uploadHeaders": {
+    "Content-Type": "image/jpeg"
+  },
   "key": "images/uuid.jpg",
   "fileId": "uuid"
 }
 ```
+
+Use `uploadHeaders` exactly as returned when sending the PUT request to
+`uploadUrl`. These headers are part of the pre-signed URL signature.
 
 ### POST /api/presign-result
 
@@ -242,9 +248,15 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "uploadHeaders": {
+    "Content-Type": "application/json"
+  },
   "key": "results/uuid.json"
 }
 ```
+
+Use `uploadHeaders` exactly as returned when sending the PUT request to
+`uploadUrl`.
 
 ## Technical Details
 

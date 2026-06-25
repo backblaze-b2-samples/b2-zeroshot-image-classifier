@@ -2,23 +2,29 @@ import { GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import path from 'path';
 
-export const IMAGE_CONTENT_TYPES = new Map([
-  ['jpg', 'image/jpeg'],
-  ['jpeg', 'image/jpeg'],
-  ['png', 'image/png'],
-  ['gif', 'image/gif'],
-  ['webp', 'image/webp'],
-  ['bmp', 'image/bmp'],
-]);
+const SUPPORTED_IMAGE_TYPES = [
+  {
+    extensions: ['jpg', 'jpeg'],
+    contentType: 'image/jpeg',
+    aliases: ['image/jpg', 'image/pjpeg'],
+  },
+  { extensions: ['png'], contentType: 'image/png', aliases: ['image/x-png'] },
+  { extensions: ['gif'], contentType: 'image/gif', aliases: [] },
+  { extensions: ['webp'], contentType: 'image/webp', aliases: [] },
+  { extensions: ['bmp'], contentType: 'image/bmp', aliases: ['image/x-ms-bmp'] },
+];
 
-const IMAGE_CONTENT_TYPE_ALIASES = new Map([
-  ['jpg', new Set(['image/jpeg', 'image/jpg', 'image/pjpeg'])],
-  ['jpeg', new Set(['image/jpeg', 'image/jpg', 'image/pjpeg'])],
-  ['png', new Set(['image/png', 'image/x-png'])],
-  ['gif', new Set(['image/gif'])],
-  ['webp', new Set(['image/webp'])],
-  ['bmp', new Set(['image/bmp', 'image/x-ms-bmp'])],
-]);
+const IMAGE_CONTENT_TYPES = new Map(
+  SUPPORTED_IMAGE_TYPES.flatMap(({ extensions, contentType }) =>
+    extensions.map((ext) => [ext, contentType])
+  )
+);
+
+const IMAGE_CONTENT_TYPE_ALIASES = new Map(
+  SUPPORTED_IMAGE_TYPES.flatMap(({ extensions, contentType, aliases }) =>
+    extensions.map((ext) => [ext, new Set([contentType, ...aliases])])
+  )
+);
 
 export function getAllowedImageExtension(filename) {
   if (!filename || typeof filename !== 'string') {
@@ -52,20 +58,35 @@ export function normalizeImageContentType(ext, contentType) {
   return aliases?.has(normalized) ? defaultContentType : null;
 }
 
-export function buildPutObjectCommandInput(bucket, key) {
-  return { Bucket: bucket, Key: key };
-}
+export async function generatePresignedUrls({
+  s3Client,
+  bucket,
+  key,
+  contentType,
+  expiresIn,
+  signingDate,
+}) {
+  if (!contentType || typeof contentType !== 'string') {
+    throw new Error('contentType is required for presigned uploads');
+  }
 
-export async function generatePresignedUrls({ s3Client, bucket, key, contentType, expiresIn }) {
+  const signOptions = {
+    expiresIn,
+    signableHeaders: new Set(['content-type']),
+  };
+  if (signingDate) {
+    signOptions.signingDate = signingDate;
+  }
+
   const putUrl = await getSignedUrl(
     s3Client,
-    new PutObjectCommand(buildPutObjectCommandInput(bucket, key)),
-    { expiresIn }
+    new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType }),
+    signOptions
   );
   const getUrl = await getSignedUrl(
     s3Client,
     new GetObjectCommand({ Bucket: bucket, Key: key }),
-    { expiresIn }
+    signOptions
   );
 
   return {
