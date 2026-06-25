@@ -63,7 +63,12 @@ function verifyResultUploadToken(fileId, resultUploadToken) {
     return false;
   }
 
-  const [payload, signature] = resultUploadToken.split('.');
+  const tokenParts = resultUploadToken.split('.');
+  if (tokenParts.length !== 2) {
+    return false;
+  }
+
+  const [payload, signature] = tokenParts;
   if (!payload || !signature) {
     return false;
   }

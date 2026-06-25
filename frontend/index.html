@@ -716,6 +716,7 @@
                 fileId = null;
                 resultUploadToken = null;
                 imageUploaded = false;
+                updateClassifyButton();
 
                 // Get pre-signed URL for image
                 const response = await fetchWithTimeout(`${API_BASE}/api/presign-image`, {

@@ -213,3 +213,14 @@ test('presign-result rejects a tampered signed result upload token', async () =>
   assert.equal(response.status, 403);
   assertNoPresignUrls(response.body);
 });
+
+test('presign-result rejects tokens with extra segments', async () => {
+  const image = await issueImageToken();
+  const response = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+    resultUploadToken: `${image.resultUploadToken}.extra`,
+  });
+
+  assert.equal(response.status, 403);
+  assertNoPresignUrls(response.body);
+});
