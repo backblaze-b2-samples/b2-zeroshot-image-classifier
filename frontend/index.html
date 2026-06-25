@@ -845,8 +845,11 @@
                     throw new Error('Failed to get result pre-signed URL');
                 }
 
-                const { uploadUrl: resultUploadUrl, publicUrl: resultPublicUrl } = await presignResponse.json();
-                resultUploadToken = null;
+                const {
+                    uploadUrl: resultUploadUrl,
+                    uploadHeaders: resultUploadHeaders = {},
+                    publicUrl: resultPublicUrl
+                } = await presignResponse.json();
 
                 // Upload result to B2
                 const resultData = {
@@ -860,7 +863,7 @@
 
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: { 'Content-Type': 'application/json', ...resultUploadHeaders },
                     body: JSON.stringify(resultData)
                 }, 120000);
 
@@ -868,6 +871,7 @@
                     throw new Error('Failed to upload results to B2');
                 }
 
+                resultUploadToken = null;
                 setProgress(PROGRESS.COMPLETE);
                 showStatus('Classification complete!', 'success');
 

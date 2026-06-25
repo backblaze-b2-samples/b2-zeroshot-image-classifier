@@ -16,7 +16,6 @@ const MANAGED_ENV_KEYS = [
   'B2_BUCKET',
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
-  'MAX_RESULT_UPLOAD_TOKENS',
   'PORT',
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
@@ -29,7 +28,6 @@ process.env.B2_BUCKET_NAME = 'server-bucket';
 process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
-process.env.MAX_RESULT_UPLOAD_TOKENS = '4';
 
 const { app } = await import('../server.js');
 
@@ -186,7 +184,7 @@ test('presign-result rejects a token issued for another fileId', async () => {
   assertNoPresignUrls(response.body);
 });
 
-test('presign-result consumes issued result upload tokens', async () => {
+test('presign-result accepts a valid signed result upload token', async () => {
   const image = await issueImageToken();
   const success = await postJson('/api/presign-result', {
     fileId: image.fileId,
@@ -196,28 +194,20 @@ test('presign-result consumes issued result upload tokens', async () => {
   assert.equal(success.status, 200);
   assert.equal(success.body.urlType, 'public');
   assert.equal(success.body.expiresIn, null);
+  assert.deepEqual(success.body.uploadHeaders, { 'If-None-Match': '*' });
   assert.match(success.body.uploadUrl, /^https:\/\//);
   assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', `results/${image.fileId}.json`)}`);
-
-  const replay = await postJson('/api/presign-result', {
-    fileId: image.fileId,
-    resultUploadToken: image.resultUploadToken,
-  });
-
-  assert.equal(replay.status, 403);
-  assertNoPresignUrls(replay.body);
 });
 
-test('presign-image evicts oldest result upload tokens at the cap', async () => {
-  const first = await issueImageToken('cap-1.jpg');
-  await issueImageToken('cap-2.jpg');
-  await issueImageToken('cap-3.jpg');
-  await issueImageToken('cap-4.jpg');
-  await issueImageToken('cap-5.jpg');
+test('presign-result rejects a tampered signed result upload token', async () => {
+  const image = await issueImageToken();
+  const lastCharacter = image.resultUploadToken.at(-1);
+  const replacement = lastCharacter === 'a' ? 'b' : 'a';
+  const tamperedToken = `${image.resultUploadToken.slice(0, -1)}${replacement}`;
 
   const response = await postJson('/api/presign-result', {
-    fileId: first.fileId,
-    resultUploadToken: first.resultUploadToken,
+    fileId: image.fileId,
+    resultUploadToken: tamperedToken,
   });
 
   assert.equal(response.status, 403);

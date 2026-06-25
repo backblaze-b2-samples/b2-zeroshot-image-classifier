@@ -241,7 +241,7 @@ Response:
 }
 ```
 
-`resultUploadToken` is a one-time token required when requesting the matching result upload URL.
+`resultUploadToken` is a signed token required when requesting the matching result upload URL.
 
 ### POST /api/presign-result
 
@@ -257,6 +257,9 @@ Response:
 ```json
 {
   "uploadUrl": "https://...",
+  "uploadHeaders": {
+    "If-None-Match": "*"
+  },
   "publicUrl": "https://...",
   "urlType": "signed",
   "expiresIn": 3600,
@@ -265,6 +268,7 @@ Response:
 ```
 
 `urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
+Send any `uploadHeaders` with the PUT request to `uploadUrl`; result uploads include `If-None-Match: *` so an existing result object is not overwritten.
 
 ## Technical Details
 

@@ -3,7 +3,7 @@ import cors from 'cors';
 import { PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
-import { randomBytes, randomUUID } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { buildPublicUrl, createB2S3Client } from './b2-config.js';
@@ -38,8 +38,6 @@ const { s3Client, bucketName: BUCKET, publicUrlBase: PUBLIC_URL_BASE } = b2;
 
 // Configurable URL expiry
 const URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
-const MAX_RESULT_UPLOAD_TOKENS = Math.max(1, parseInt(process.env.MAX_RESULT_UPLOAD_TOKENS, 10) || 1000);
-const resultUploadTokens = new Map();
 
 // Robust boolean parsing for AUTO_SETUP_CORS
 const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
@@ -50,70 +48,63 @@ const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
 const ALLOWED_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function cleanupExpiredResultTokens(now = Date.now()) {
-  for (const [token, record] of resultUploadTokens) {
-    if (record.expiresAt <= now) {
-      resultUploadTokens.delete(token);
-    }
-  }
-}
-
-function trimResultUploadTokens() {
-  cleanupExpiredResultTokens();
-  while (resultUploadTokens.size >= MAX_RESULT_UPLOAD_TOKENS) {
-    const oldestToken = resultUploadTokens.keys().next().value;
-    resultUploadTokens.delete(oldestToken);
-  }
-}
-
 function issueResultUploadToken(fileId) {
-  trimResultUploadTokens();
-  const resultUploadToken = randomBytes(32).toString('base64url');
-  resultUploadTokens.set(resultUploadToken, {
+  const payload = Buffer.from(JSON.stringify({
     fileId,
-    expiresAt: Date.now() + URL_EXPIRY * 1000,
-    pending: false,
-  });
-  return resultUploadToken;
+    exp: Date.now() + URL_EXPIRY * 1000,
+    nonce: randomBytes(16).toString('base64url'),
+  })).toString('base64url');
+  const signature = createHmac('sha256', b2.applicationKey).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
 }
 
-function reserveResultUploadToken(fileId, resultUploadToken) {
-  cleanupExpiredResultTokens();
-
+function verifyResultUploadToken(fileId, resultUploadToken) {
   if (!resultUploadToken || typeof resultUploadToken !== 'string') {
     return false;
   }
 
-  const record = resultUploadTokens.get(resultUploadToken);
-  if (!record || record.pending || record.fileId !== fileId) {
+  const [payload, signature] = resultUploadToken.split('.');
+  if (!payload || !signature) {
     return false;
   }
 
-  record.pending = true;
-  return true;
-}
+  const expectedSignature = createHmac('sha256', b2.applicationKey).update(payload).digest('base64url');
+  const signatureBuffer = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expectedSignature);
 
-function consumeResultUploadToken(resultUploadToken) {
-  resultUploadTokens.delete(resultUploadToken);
-}
+  if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) {
+    return false;
+  }
 
-function releaseResultUploadToken(resultUploadToken) {
-  const record = resultUploadTokens.get(resultUploadToken);
-  if (record) {
-    record.pending = false;
+  try {
+    const tokenPayload = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return tokenPayload.fileId === fileId &&
+      Number.isFinite(tokenPayload.exp) &&
+      tokenPayload.exp > Date.now();
+  } catch {
+    return false;
   }
 }
 
 // Shared presign helper
-async function generatePresignedUrls(key, contentType) {
+async function generatePresignedUrls(key, contentType, options = {}) {
+  const putObjectParams = { Bucket: BUCKET, Key: key, ContentType: contentType };
+  const uploadHeaders = {};
+
+  if (options.preventOverwrite) {
+    putObjectParams.IfNoneMatch = '*';
+    uploadHeaders['If-None-Match'] = '*';
+  }
+
   const putUrl = await getSignedUrl(
     s3Client,
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
+    new PutObjectCommand(putObjectParams),
     { expiresIn: URL_EXPIRY }
   );
+  const uploadUrlMetadata = Object.keys(uploadHeaders).length > 0 ? { uploadHeaders } : {};
   const publicUrl = buildPublicUrl(PUBLIC_URL_BASE, key);
   if (publicUrl) {
-    return { uploadUrl: putUrl, publicUrl, urlType: 'public', expiresIn: null };
+    return { uploadUrl: putUrl, ...uploadUrlMetadata, publicUrl, urlType: 'public', expiresIn: null };
   }
 
   const signedUrl = await getSignedUrl(
@@ -121,7 +112,7 @@ async function generatePresignedUrls(key, contentType) {
     new GetObjectCommand({ Bucket: BUCKET, Key: key }),
     { expiresIn: URL_EXPIRY }
   );
-  return { uploadUrl: putUrl, publicUrl: signedUrl, urlType: 'signed', expiresIn: URL_EXPIRY };
+  return { uploadUrl: putUrl, ...uploadUrlMetadata, publicUrl: signedUrl, urlType: 'signed', expiresIn: URL_EXPIRY };
 }
 
 // Generate pre-signed PUT URL for image upload
@@ -172,20 +163,18 @@ app.post('/api/presign-result', async (req, res) => {
       return res.status(400).json({ error: 'Invalid file ID' });
     }
 
-    if (!reserveResultUploadToken(fileId, resultUploadToken)) {
+    if (!verifyResultUploadToken(fileId, resultUploadToken)) {
       return res.status(403).json({ error: 'Invalid or expired result upload token' });
     }
 
-    try {
-      const key = `results/${fileId}.json`;
-      const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
-      consumeResultUploadToken(resultUploadToken);
+    const key = `results/${fileId}.json`;
+    const { uploadUrl, uploadHeaders, publicUrl, urlType, expiresIn } = await generatePresignedUrls(
+      key,
+      'application/json',
+      { preventOverwrite: true }
+    );
 
-      res.json({ uploadUrl, publicUrl, urlType, expiresIn, key });
-    } catch (error) {
-      releaseResultUploadToken(resultUploadToken);
-      throw error;
-    }
+    res.json({ uploadUrl, uploadHeaders, publicUrl, urlType, expiresIn, key });
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
