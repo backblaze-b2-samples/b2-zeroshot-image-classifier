@@ -65,6 +65,8 @@ export function createApp({
   }
 
   function issueResultUploadToken(fileId) {
+    // HMAC uses the B2 application key as the sample's shared server secret;
+    // rotating that key intentionally invalidates in-flight result tokens.
     const exp = Date.now() + urlExpiry * 1000;
     const nonce = randomBytes(16).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ fileId, exp, nonce })).toString('base64url');
@@ -252,6 +254,9 @@ export function createApp({
         return res.status(400).json({ error: 'Invalid file ID' });
       }
 
+      // Legacy fileId-only grants remain during migration. Their HEAD-then-PUT
+      // marker flow has a narrow TOCTOU window, accepted only for this
+      // deprecated path; signed resultUploadToken grants avoid this race.
       const tokenPayload = resultUploadToken ? verifyResultUploadToken(fileId, resultUploadToken) : null;
       const legacy = !resultUploadToken;
       const legacyMetadata = legacy ? await getGrantMarkerMetadata(legacyActiveGrantKey(fileId)) : null;

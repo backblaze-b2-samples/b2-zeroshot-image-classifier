@@ -20,6 +20,8 @@ const PLACEHOLDER_VALUES = new Set([
 const SAMPLE_USER_AGENT_MARKER = '(backblaze-b2-samples)';
 const SAMPLE_USER_AGENT = 'b2ai-clip-classifier/1.0.0';
 const LEGACY_ENDPOINT_ENV = 'B2_ENDPOINT';
+// Module-scoped on purpose: warn once per Node process, including repeated
+// app/client creation in tests. Restart the process to reset deprecation logs.
 const warnedEnvVars = new Set();
 
 function cleanEnv(key) {
