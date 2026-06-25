@@ -257,18 +257,15 @@ Response:
 ```json
 {
   "uploadUrl": "https://...",
-  "uploadHeaders": {
-    "If-None-Match": "*"
-  },
   "publicUrl": "https://...",
   "urlType": "signed",
   "expiresIn": 3600,
-  "key": "results/uuid.json"
+  "key": "results/uuid/result-uuid.json"
 }
 ```
 
 `urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
-Send any `uploadHeaders` with the PUT request to `uploadUrl`; result uploads include `If-None-Match: *` so an existing result object is not overwritten.
+Each result upload URL uses a new server-issued object key under the token's `fileId`, so browser clients can upload with only the `Content-Type: application/json` header and do not need forbidden conditional request headers.
 
 ## Technical Details
 

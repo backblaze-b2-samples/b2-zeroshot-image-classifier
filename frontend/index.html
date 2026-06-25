@@ -848,7 +848,6 @@
 
                 const {
                     uploadUrl: resultUploadUrl,
-                    uploadHeaders: resultUploadHeaders = {},
                     publicUrl: resultPublicUrl
                 } = await presignResponse.json();
 
@@ -864,7 +863,7 @@
 
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json', ...resultUploadHeaders },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(resultData)
                 }, 120000);
 

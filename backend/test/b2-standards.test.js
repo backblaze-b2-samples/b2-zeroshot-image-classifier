@@ -194,9 +194,30 @@ test('presign-result accepts a valid signed result upload token', async () => {
   assert.equal(success.status, 200);
   assert.equal(success.body.urlType, 'public');
   assert.equal(success.body.expiresIn, null);
-  assert.deepEqual(success.body.uploadHeaders, { 'If-None-Match': '*' });
+  assert.equal(success.body.uploadHeaders, undefined);
+  assert.match(success.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
   assert.match(success.body.uploadUrl, /^https:\/\//);
-  assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', `results/${image.fileId}.json`)}`);
+  assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', success.body.key)}`);
+});
+
+test('presign-result returns unique browser-compatible result keys', async () => {
+  const image = await issueImageToken();
+  const first = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+    resultUploadToken: image.resultUploadToken,
+  });
+  const second = await postJson('/api/presign-result', {
+    fileId: image.fileId,
+    resultUploadToken: image.resultUploadToken,
+  });
+
+  assert.equal(first.status, 200);
+  assert.equal(second.status, 200);
+  assert.equal(first.body.uploadHeaders, undefined);
+  assert.equal(second.body.uploadHeaders, undefined);
+  assert.notEqual(first.body.key, second.body.key);
+  assert.match(first.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
+  assert.match(second.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
 });
 
 test('presign-result rejects a tampered signed result upload token', async () => {

@@ -92,24 +92,17 @@ function verifyResultUploadToken(fileId, resultUploadToken) {
 }
 
 // Shared presign helper
-async function generatePresignedUrls(key, contentType, options = {}) {
+async function generatePresignedUrls(key, contentType) {
   const putObjectParams = { Bucket: BUCKET, Key: key, ContentType: contentType };
-  const uploadHeaders = {};
-
-  if (options.preventOverwrite) {
-    putObjectParams.IfNoneMatch = '*';
-    uploadHeaders['If-None-Match'] = '*';
-  }
 
   const putUrl = await getSignedUrl(
     s3Client,
     new PutObjectCommand(putObjectParams),
     { expiresIn: URL_EXPIRY }
   );
-  const uploadUrlMetadata = Object.keys(uploadHeaders).length > 0 ? { uploadHeaders } : {};
   const publicUrl = buildPublicUrl(PUBLIC_URL_BASE, key);
   if (publicUrl) {
-    return { uploadUrl: putUrl, ...uploadUrlMetadata, publicUrl, urlType: 'public', expiresIn: null };
+    return { uploadUrl: putUrl, publicUrl, urlType: 'public', expiresIn: null };
   }
 
   const signedUrl = await getSignedUrl(
@@ -117,7 +110,7 @@ async function generatePresignedUrls(key, contentType, options = {}) {
     new GetObjectCommand({ Bucket: BUCKET, Key: key }),
     { expiresIn: URL_EXPIRY }
   );
-  return { uploadUrl: putUrl, ...uploadUrlMetadata, publicUrl: signedUrl, urlType: 'signed', expiresIn: URL_EXPIRY };
+  return { uploadUrl: putUrl, publicUrl: signedUrl, urlType: 'signed', expiresIn: URL_EXPIRY };
 }
 
 // Generate pre-signed PUT URL for image upload
@@ -172,14 +165,10 @@ app.post('/api/presign-result', async (req, res) => {
       return res.status(403).json({ error: 'Invalid or expired result upload token' });
     }
 
-    const key = `results/${fileId}.json`;
-    const { uploadUrl, uploadHeaders, publicUrl, urlType, expiresIn } = await generatePresignedUrls(
-      key,
-      'application/json',
-      { preventOverwrite: true }
-    );
+    const key = `results/${fileId}/${randomUUID()}.json`;
+    const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
 
-    res.json({ uploadUrl, uploadHeaders, publicUrl, urlType, expiresIn, key });
+    res.json({ uploadUrl, publicUrl, urlType, expiresIn, key });
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -242,6 +231,6 @@ export async function startServer() {
   process.on('SIGINT', shutdown);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   startServer();
 }
