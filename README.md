@@ -78,7 +78,6 @@ B2_APPLICATION_KEY_ID=your_application_key_id
 B2_APPLICATION_KEY=your_application_key
 B2_BUCKET_NAME=your-bucket-name
 B2_PUBLIC_URL_BASE=
-MAX_RESULT_UPLOAD_TOKENS=1000
 ```
 
 > Set `B2_REGION` from your bucket details page. The app derives the S3-compatible endpoint as `https://s3.<B2_REGION>.backblazeb2.com`. Set `B2_PUBLIC_URL_BASE` only when your bucket is public or fronted by a CDN; otherwise the app returns pre-signed download URLs.

@@ -31,7 +31,7 @@ process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
 
-const { app, createApp } = await import('../server.js');
+const { createApp } = await import('../server.js');
 
 async function withEnv(values, fn) {
   const previous = new Map(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -143,8 +143,69 @@ test('B2 client sends the Backblaze sample user-agent marker', async () => {
 
 let server;
 let baseUrl;
+let app;
+let s3Server;
+let testB2;
+const grantMarkers = new Map();
 
 test.before(async () => {
+  s3Server = http.createServer((req, res) => {
+    const requestUrl = new URL(req.url, 'http://127.0.0.1');
+    const pathParts = requestUrl.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    const grantPrefixIndex = pathParts.indexOf('_result-upload-grants');
+    const keyParts = grantPrefixIndex >= 0 ? pathParts.slice(grantPrefixIndex) : pathParts.slice(1);
+    const key = keyParts.join('/');
+
+    function send(status, headers = {}) {
+      req.resume();
+      res.writeHead(status, headers);
+      res.end();
+    }
+
+    if (key.startsWith('_result-upload-grants/')) {
+      if (req.method === 'HEAD') {
+        const metadata = grantMarkers.get(key);
+        if (!metadata) {
+          send(404);
+          return;
+        }
+        send(200, Object.fromEntries(
+          Object.entries(metadata).map(([metadataKey, value]) => [`x-amz-meta-${metadataKey}`, String(value)])
+        ));
+        return;
+      }
+
+      if (req.method === 'PUT') {
+        if (grantMarkers.has(key)) {
+          send(412);
+          return;
+        }
+
+        const metadata = Object.fromEntries(
+          Object.entries(req.headers)
+            .filter(([header]) => header.startsWith('x-amz-meta-'))
+            .map(([header, value]) => [header.replace('x-amz-meta-', ''), value])
+        );
+        grantMarkers.set(key, metadata);
+        send(200);
+        return;
+      }
+    }
+
+    send(200);
+  });
+  s3Server.listen(0, '127.0.0.1');
+  await once(s3Server, 'listening');
+  const { port: s3Port } = s3Server.address();
+  testB2 = createB2S3Client({
+    endpoint: `http://127.0.0.1:${s3Port}`,
+    region: REGION_ONE,
+    applicationKeyId: 'server-key-id',
+    applicationKey: 'server-application-key',
+    bucketName: 'server-bucket',
+    publicUrlBase: 'https://cdn.example/classifier',
+  });
+  app = createApp({ b2: testB2 });
   server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const { port } = server.address();
@@ -154,6 +215,8 @@ test.before(async () => {
 test.after(async () => {
   server.close();
   await once(server, 'close');
+  s3Server.close();
+  await once(s3Server, 'close');
 });
 
 async function postJson(path, body) {
@@ -213,23 +276,6 @@ test('presign-image rejects active or mismatched image content types', async () 
   assertNoPresignUrls(mismatchResponse.body);
 });
 
-test('presign-image enforces pending result token quota', async () => {
-  await withStartedApp(createApp({ maxResultUploadTokens: 1 }), async (targetBaseUrl) => {
-    const first = await postJsonTo(targetBaseUrl, '/api/presign-image', {
-      filename: 'first.jpg',
-      contentType: 'image/jpeg',
-    });
-    const second = await postJsonTo(targetBaseUrl, '/api/presign-image', {
-      filename: 'second.jpg',
-      contentType: 'image/jpeg',
-    });
-
-    assert.equal(first.status, 200);
-    assert.equal(second.status, 429);
-    assertNoPresignUrls(second.body);
-  });
-});
-
 test('presign-result rejects an unknown result upload token', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: '00000000-0000-4000-8000-000000000000',
@@ -273,8 +319,22 @@ test('presign-result accepts a valid signed result upload token', async () => {
   assert.equal(success.body.expiresIn, null);
   assert.equal(success.body.uploadHeaders, undefined);
   assert.match(success.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
-  assert.match(success.body.uploadUrl, /^https:\/\//);
+  assert.match(success.body.uploadUrl, /^https?:\/\//);
   assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', success.body.key)}`);
+});
+
+test('presign-result accepts token grants across app instances', async () => {
+  const image = await issueImageToken();
+
+  await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+    const success = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: image.fileId,
+      resultUploadToken: image.resultUploadToken,
+    });
+
+    assert.equal(success.status, 200);
+    assert.match(success.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
+  });
 });
 
 test('presign-result accepts a legacy fileId-only request once', async () => {
@@ -293,10 +353,24 @@ test('presign-result accepts a legacy fileId-only request once', async () => {
   assert.equal(success.status, 200);
   assert.equal(success.body.key, `results/${image.fileId}.json`);
   assert.equal(success.body.deprecation, 'resultUploadToken will be required in a future release');
+  assert.equal(grantMarkers.has(`_result-upload-grants/file-used/${image.fileId}.json`), true);
   assert.equal(replay.status, 403);
   assert.equal(tokenReplay.status, 403);
   assertNoPresignUrls(replay.body);
   assertNoPresignUrls(tokenReplay.body);
+});
+
+test('presign-result accepts legacy grants across app instances', async () => {
+  const image = await issueImageToken();
+
+  await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+    const success = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: image.fileId,
+    });
+
+    assert.equal(success.status, 200);
+    assert.equal(success.body.key, `results/${image.fileId}.json`);
+  });
 });
 
 test('presign-result rejects replayed result upload tokens', async () => {

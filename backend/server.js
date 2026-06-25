@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import { PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const DEFAULT_URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
-const DEFAULT_MAX_RESULT_UPLOAD_TOKENS = parseInt(process.env.MAX_RESULT_UPLOAD_TOKENS, 10) || 1000;
+const RESULT_GRANT_PREFIX = '_result-upload-grants';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const IMAGE_MIME_BY_EXT = new Map([
   ['jpg', ['image/jpeg']],
@@ -53,12 +53,9 @@ export function createApp({
   b2: initialB2,
   urlExpiry = DEFAULT_URL_EXPIRY,
   autoSetupCors = readAutoSetupCors(),
-  maxResultUploadTokens = DEFAULT_MAX_RESULT_UPLOAD_TOKENS,
 } = {}) {
   const app = express();
   let b2 = initialB2;
-  const activeResultUploadGrants = new Map();
-  const legacyResultFileIds = new Map();
 
   function getB2() {
     if (!b2) {
@@ -67,36 +64,11 @@ export function createApp({
     return b2;
   }
 
-  function deleteResultUploadGrant(nonce) {
-    const grant = activeResultUploadGrants.get(nonce);
-    if (grant && legacyResultFileIds.get(grant.fileId) === nonce) {
-      legacyResultFileIds.delete(grant.fileId);
-    }
-    activeResultUploadGrants.delete(nonce);
-  }
-
-  function pruneResultUploadGrants() {
-    const now = Date.now();
-    for (const [nonce, grant] of activeResultUploadGrants) {
-      if (grant.exp <= now) {
-        deleteResultUploadGrant(nonce);
-      }
-    }
-  }
-
   function issueResultUploadToken(fileId) {
-    pruneResultUploadGrants();
-    if (activeResultUploadGrants.size >= maxResultUploadTokens) {
-      return null;
-    }
-
     const exp = Date.now() + urlExpiry * 1000;
     const nonce = randomBytes(16).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ fileId, exp, nonce })).toString('base64url');
     const signature = createHmac('sha256', getB2().applicationKey).update(payload).digest('base64url');
-
-    activeResultUploadGrants.set(nonce, { fileId, exp });
-    legacyResultFileIds.set(fileId, nonce);
 
     return `${payload}.${signature}`;
   }
@@ -136,33 +108,60 @@ export function createApp({
     }
   }
 
-  function consumeResultUploadGrant(fileId, resultUploadToken) {
-    pruneResultUploadGrants();
+  function legacyActiveGrantKey(fileId) {
+    return `${RESULT_GRANT_PREFIX}/legacy-active/${fileId}.json`;
+  }
 
-    if (!resultUploadToken) {
-      const legacyNonce = legacyResultFileIds.get(fileId);
-      const legacyGrant = legacyNonce ? activeResultUploadGrants.get(legacyNonce) : null;
-      if (!legacyGrant || legacyGrant.fileId !== fileId || legacyGrant.exp <= Date.now()) {
-        if (legacyNonce) {
-          deleteResultUploadGrant(legacyNonce);
-        }
-        return { ok: false };
+  function fileUsedGrantKey(fileId) {
+    return `${RESULT_GRANT_PREFIX}/file-used/${fileId}.json`;
+  }
+
+  function isMissingObjectError(error) {
+    return error?.$metadata?.httpStatusCode === 404 ||
+      error?.name === 'NotFound' ||
+      error?.Code === 'NotFound' ||
+      error?.Code === 'NoSuchKey';
+  }
+
+  function isPreconditionFailed(error) {
+    return error?.$metadata?.httpStatusCode === 412 ||
+      error?.name === 'PreconditionFailed' ||
+      error?.Code === 'PreconditionFailed';
+  }
+
+  async function getGrantMarkerMetadata(key) {
+    const { s3Client, bucketName: bucket } = getB2();
+    try {
+      const response = await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return response.Metadata || {};
+    } catch (error) {
+      if (isMissingObjectError(error)) {
+        return null;
       }
-      deleteResultUploadGrant(legacyNonce);
-      return { ok: true, legacy: true };
+      throw error;
     }
+  }
 
-    const tokenPayload = verifyResultUploadToken(fileId, resultUploadToken);
-    const activeGrant = tokenPayload ? activeResultUploadGrants.get(tokenPayload.nonce) : null;
-    if (!activeGrant ||
-      activeGrant.fileId !== fileId ||
-      activeGrant.exp !== tokenPayload.exp ||
-      activeGrant.exp <= Date.now()) {
-      return { ok: false };
+  async function createGrantMarker(key, metadata) {
+    const { s3Client, bucketName: bucket } = getB2();
+    try {
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ContentType: 'application/json',
+        Body: JSON.stringify(metadata),
+        Metadata: Object.fromEntries(
+          Object.entries(metadata).map(([metadataKey, value]) => [metadataKey, String(value)])
+        ),
+        IfNoneMatch: '*',
+      }));
+      return true;
+    } catch (error) {
+      if (isPreconditionFailed(error)) {
+        return false;
+      }
+      throw error;
     }
-
-    deleteResultUploadGrant(tokenPayload.nonce);
-    return { ok: true, legacy: false };
   }
 
   async function generatePresignedUrls(key, contentType) {
@@ -216,12 +215,16 @@ export function createApp({
 
       const fileId = randomUUID();
       const resultUploadToken = issueResultUploadToken(fileId);
-      if (!resultUploadToken) {
-        return res.status(429).json({ error: 'Too many pending result upload tokens' });
-      }
-
       const key = `images/${fileId}.${ext}`;
       const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, normalizedContentType);
+      const legacyGrantCreated = await createGrantMarker(legacyActiveGrantKey(fileId), {
+        fileId,
+        exp: Date.now() + urlExpiry * 1000,
+        createdAt: new Date().toISOString(),
+      });
+      if (!legacyGrantCreated) {
+        return res.status(409).json({ error: 'File ID collision, please retry' });
+      }
 
       res.json({
         uploadUrl,
@@ -249,15 +252,31 @@ export function createApp({
         return res.status(400).json({ error: 'Invalid file ID' });
       }
 
-      const grant = consumeResultUploadGrant(fileId, resultUploadToken);
-      if (!grant.ok) {
+      const tokenPayload = resultUploadToken ? verifyResultUploadToken(fileId, resultUploadToken) : null;
+      const legacy = !resultUploadToken;
+      const legacyMetadata = legacy ? await getGrantMarkerMetadata(legacyActiveGrantKey(fileId)) : null;
+      if (!legacy && !tokenPayload) {
+        return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
+      }
+      if (legacy && (!legacyMetadata || Number(legacyMetadata.exp) <= Date.now())) {
         return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
       }
 
-      const key = grant.legacy ? `results/${fileId}.json` : `results/${fileId}/${randomUUID()}.json`;
+      const key = legacy ? `results/${fileId}.json` : `results/${fileId}/${randomUUID()}.json`;
       const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
+      const finalized = legacy
+        ? await createGrantMarker(fileUsedGrantKey(fileId), { fileId, usedAt: new Date().toISOString() })
+        : await createGrantMarker(fileUsedGrantKey(fileId), {
+          fileId,
+          nonce: tokenPayload.nonce,
+          exp: tokenPayload.exp,
+          usedAt: new Date().toISOString(),
+        });
+      if (!finalized) {
+        return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
+      }
 
-      if (grant.legacy) {
+      if (legacy) {
         res.set('Deprecation', 'true');
       }
 
@@ -267,7 +286,7 @@ export function createApp({
         urlType,
         expiresIn,
         key,
-        ...(grant.legacy ? { deprecation: 'resultUploadToken will be required in a future release' } : {}),
+        ...(legacy ? { deprecation: 'resultUploadToken will be required in a future release' } : {}),
       });
     } catch (error) {
       console.error('Error generating result presigned URL:', error);
