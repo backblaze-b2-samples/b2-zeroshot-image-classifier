@@ -18,7 +18,7 @@ const PLACEHOLDER_VALUES = new Set([
 ]);
 
 const SAMPLE_USER_AGENT_MARKER = '(backblaze-b2-samples)';
-const SAMPLE_USER_AGENT = `b2ai-clip-classifier/1.0.0 ${SAMPLE_USER_AGENT_MARKER}`;
+const SAMPLE_USER_AGENT = 'b2ai-clip-classifier/1.0.0';
 const LEGACY_ENDPOINT_ENV = 'B2_ENDPOINT';
 const warnedEnvVars = new Set();
 

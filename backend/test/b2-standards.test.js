@@ -135,6 +135,7 @@ test('B2 client sends the Backblaze sample user-agent marker', async () => {
 
     await s3Client.send(new HeadBucketCommand({ Bucket: 'bucket-name' }));
     assert.match(observedUserAgent, /\(backblaze-b2-samples\)/);
+    assert.equal((observedUserAgent.match(/backblaze-b2-samples/g) || []).length, 1);
   } finally {
     captureServer.close();
     await once(captureServer, 'close');
