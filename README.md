@@ -82,6 +82,15 @@ B2_PUBLIC_URL_BASE=
 
 > Set `B2_REGION` from your bucket details page. The app derives the S3-compatible endpoint as `https://s3.<B2_REGION>.backblazeb2.com`. Set `B2_PUBLIC_URL_BASE` only when your bucket is public or fronted by a CDN; otherwise the app returns pre-signed download URLs.
 
+For rolling deploys from older versions, keep the old and new variable names set until all replicas and rollback targets run this version or later. The new names take precedence and the server logs a deprecation warning when it falls back to an old name.
+
+| Old name | New name |
+| --- | --- |
+| `B2_KEY_ID` | `B2_APPLICATION_KEY_ID` |
+| `B2_APP_KEY` | `B2_APPLICATION_KEY` |
+| `B2_BUCKET` | `B2_BUCKET_NAME` |
+| `B2_ENDPOINT` | `B2_REGION` derives `https://s3.<B2_REGION>.backblazeb2.com` |
+
 ### 3. Start the App
 
 ```bash
@@ -223,17 +232,24 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "urlType": "signed",
+  "expiresIn": 3600,
   "key": "images/uuid.jpg",
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadToken": "unguessable-token",
+  "resultUploadTokenExpiresIn": 3600
 }
 ```
+
+`resultUploadToken` is a one-time token required when requesting the matching result upload URL.
 
 ### POST /api/presign-result
 
 Request:
 ```json
 {
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadToken": "unguessable-token"
 }
 ```
 
@@ -242,9 +258,13 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "urlType": "signed",
+  "expiresIn": 3600,
   "key": "results/uuid.json"
 }
 ```
+
+`urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
 
 ## Technical Details
 

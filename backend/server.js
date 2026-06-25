@@ -3,7 +3,7 @@ import cors from 'cors';
 import { PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import dotenv from 'dotenv';
-import { randomUUID } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { buildPublicUrl, createB2S3Client } from './b2-config.js';
@@ -23,7 +23,7 @@ try {
   process.exit(1);
 }
 
-const app = express();
+export const app = express();
 
 // Configurable CORS origin
 app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
@@ -38,6 +38,7 @@ const { s3Client, bucketName: BUCKET, publicUrlBase: PUBLIC_URL_BASE } = b2;
 
 // Configurable URL expiry
 const URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
+const resultUploadTokens = new Map();
 
 // Robust boolean parsing for AUTO_SETUP_CORS
 const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
@@ -48,6 +49,40 @@ const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
 const ALLOWED_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function cleanupExpiredResultTokens(now = Date.now()) {
+  for (const [token, record] of resultUploadTokens) {
+    if (record.expiresAt <= now) {
+      resultUploadTokens.delete(token);
+    }
+  }
+}
+
+function issueResultUploadToken(fileId) {
+  cleanupExpiredResultTokens();
+  const resultUploadToken = randomBytes(32).toString('base64url');
+  resultUploadTokens.set(resultUploadToken, {
+    fileId,
+    expiresAt: Date.now() + URL_EXPIRY * 1000,
+  });
+  return resultUploadToken;
+}
+
+function consumeResultUploadToken(fileId, resultUploadToken) {
+  cleanupExpiredResultTokens();
+
+  if (!resultUploadToken || typeof resultUploadToken !== 'string') {
+    return false;
+  }
+
+  const record = resultUploadTokens.get(resultUploadToken);
+  if (!record || record.fileId !== fileId) {
+    return false;
+  }
+
+  resultUploadTokens.delete(resultUploadToken);
+  return true;
+}
+
 // Shared presign helper
 async function generatePresignedUrls(key, contentType) {
   const putUrl = await getSignedUrl(
@@ -55,12 +90,17 @@ async function generatePresignedUrls(key, contentType) {
     new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
     { expiresIn: URL_EXPIRY }
   );
-  const publicUrl = buildPublicUrl(PUBLIC_URL_BASE, key) || await getSignedUrl(
+  const publicUrl = buildPublicUrl(PUBLIC_URL_BASE, key);
+  if (publicUrl) {
+    return { uploadUrl: putUrl, publicUrl, urlType: 'public', expiresIn: null };
+  }
+
+  const signedUrl = await getSignedUrl(
     s3Client,
     new GetObjectCommand({ Bucket: BUCKET, Key: key }),
     { expiresIn: URL_EXPIRY }
   );
-  return { uploadUrl: putUrl, publicUrl };
+  return { uploadUrl: putUrl, publicUrl: signedUrl, urlType: 'signed', expiresIn: URL_EXPIRY };
 }
 
 // Generate pre-signed PUT URL for image upload
@@ -82,9 +122,19 @@ app.post('/api/presign-image', async (req, res) => {
 
     const fileId = randomUUID();
     const key = `images/${fileId}.${ext}`;
-    const { uploadUrl, publicUrl } = await generatePresignedUrls(key, contentType || 'image/jpeg');
+    const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, contentType || 'image/jpeg');
+    const resultUploadToken = issueResultUploadToken(fileId);
 
-    res.json({ uploadUrl, publicUrl, key, fileId });
+    res.json({
+      uploadUrl,
+      publicUrl,
+      urlType,
+      expiresIn,
+      key,
+      fileId,
+      resultUploadToken,
+      resultUploadTokenExpiresIn: URL_EXPIRY,
+    });
   } catch (error) {
     console.error('Error generating image presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -94,17 +144,21 @@ app.post('/api/presign-image', async (req, res) => {
 // Generate pre-signed PUT URL for result upload
 app.post('/api/presign-result', async (req, res) => {
   try {
-    const { fileId } = req.body;
+    const { fileId, resultUploadToken } = req.body;
 
     // Validate fileId is a UUID
     if (!fileId || !UUID_RE.test(fileId)) {
       return res.status(400).json({ error: 'Invalid file ID' });
     }
 
-    const key = `results/${fileId}.json`;
-    const { uploadUrl, publicUrl } = await generatePresignedUrls(key, 'application/json');
+    if (!consumeResultUploadToken(fileId, resultUploadToken)) {
+      return res.status(403).json({ error: 'Invalid or expired result upload token' });
+    }
 
-    res.json({ uploadUrl, publicUrl, key });
+    const key = `results/${fileId}.json`;
+    const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
+
+    res.json({ uploadUrl, publicUrl, urlType, expiresIn, key });
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -125,7 +179,7 @@ app.get('/health', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 
 // Auto-setup CORS on startup
-async function startServer() {
+export async function startServer() {
   if (AUTO_SETUP_CORS) {
     console.log('Checking B2 CORS configuration...');
     try {
@@ -167,4 +221,6 @@ async function startServer() {
   process.on('SIGINT', shutdown);
 }
 
-startServer();
+if (import.meta.url === `file://${process.argv[1]}`) {
+  startServer();
+}
