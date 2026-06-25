@@ -727,7 +727,12 @@
                     throw new Error('Failed to get pre-signed URL');
                 }
 
-                const { uploadUrl, publicUrl, fileId: id } = await response.json();
+                const {
+                    uploadUrl,
+                    publicUrl,
+                    fileId: id,
+                    uploadHeaders = { 'Content-Type': selectedFile.type }
+                } = await response.json();
                 fileId = id;
 
                 setProgress(PROGRESS.PRESIGN_DONE);
@@ -735,7 +740,7 @@
                 // Upload image to B2 (120s timeout for large files)
                 const uploadResponse = await fetchWithTimeout(uploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': selectedFile.type },
+                    headers: uploadHeaders,
                     body: selectedFile
                 }, 120000);
 
@@ -836,7 +841,11 @@
                     throw new Error('Failed to get result pre-signed URL');
                 }
 
-                const { uploadUrl: resultUploadUrl, publicUrl: resultPublicUrl } = await presignResponse.json();
+                const {
+                    uploadUrl: resultUploadUrl,
+                    publicUrl: resultPublicUrl,
+                    uploadHeaders: resultUploadHeaders = { 'Content-Type': 'application/json' }
+                } = await presignResponse.json();
 
                 // Upload result to B2
                 const resultData = {
@@ -850,7 +859,7 @@
 
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: resultUploadHeaders,
                     body: JSON.stringify(resultData)
                 }, 120000);
 

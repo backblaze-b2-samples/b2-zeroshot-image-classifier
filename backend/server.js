@@ -1,12 +1,16 @@
 import express from 'express';
 import cors from 'cors';
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { S3Client, HeadBucketCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { setupCORS } from './setup-cors.js';
+import {
+  generatePresignedUrls as createPresignedUrls,
+  getAllowedImageExtension,
+  normalizeImageContentType,
+} from './presign.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,23 +58,17 @@ const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
   (process.env.AUTO_SETUP_CORS || '').toLowerCase()
 );
 
-// Allowed image extensions
-const ALLOWED_IMAGE_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp']);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Shared presign helper
 async function generatePresignedUrls(key, contentType) {
-  const putUrl = await getSignedUrl(
+  return createPresignedUrls({
     s3Client,
-    new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }),
-    { expiresIn: URL_EXPIRY }
-  );
-  const getUrl = await getSignedUrl(
-    s3Client,
-    new GetObjectCommand({ Bucket: BUCKET, Key: key }),
-    { expiresIn: URL_EXPIRY }
-  );
-  return { uploadUrl: putUrl, publicUrl: getUrl };
+    bucket: BUCKET,
+    key,
+    contentType,
+    expiresIn: URL_EXPIRY,
+  });
 }
 
 // Generate pre-signed PUT URL for image upload
@@ -82,19 +80,24 @@ app.post('/api/presign-image', async (req, res) => {
     if (!filename || typeof filename !== 'string') {
       return res.status(400).json({ error: 'Missing or invalid filename' });
     }
-    const ext = path.extname(filename).replace('.', '').toLowerCase();
-    if (!ALLOWED_IMAGE_EXT.has(ext)) {
+    const ext = getAllowedImageExtension(filename);
+    if (!ext) {
       return res.status(400).json({ error: 'Unsupported image format' });
     }
-    if (contentType && !String(contentType).startsWith('image/')) {
+
+    const uploadContentType = normalizeImageContentType(ext, contentType);
+    if (!uploadContentType) {
       return res.status(400).json({ error: 'Invalid content type' });
     }
 
     const fileId = randomUUID();
     const key = `images/${fileId}.${ext}`;
-    const { uploadUrl, publicUrl } = await generatePresignedUrls(key, contentType || 'image/jpeg');
+    const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
+      key,
+      uploadContentType
+    );
 
-    res.json({ uploadUrl, publicUrl, key, fileId });
+    res.json({ uploadUrl, publicUrl, uploadHeaders, key, fileId });
   } catch (error) {
     console.error('Error generating image presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -112,9 +115,12 @@ app.post('/api/presign-result', async (req, res) => {
     }
 
     const key = `results/${fileId}.json`;
-    const { uploadUrl, publicUrl } = await generatePresignedUrls(key, 'application/json');
+    const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
+      key,
+      'application/json'
+    );
 
-    res.json({ uploadUrl, publicUrl, key });
+    res.json({ uploadUrl, publicUrl, uploadHeaders, key });
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
