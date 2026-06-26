@@ -214,7 +214,8 @@ Request:
 ```json
 {
   "filename": "photo.jpg",
-  "contentType": "image/jpeg"
+  "contentType": "image/jpeg",
+  "contentLength": 1048576
 }
 ```
 
@@ -226,20 +227,27 @@ Response:
   "uploadHeaders": {
     "Content-Type": "image/jpeg"
   },
+  "contentLength": 1048576,
   "key": "images/uuid.jpg",
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadGrant": "signed-result-upload-grant",
+  "maxUploadBytes": 10485760
 }
 ```
 
 Use `uploadHeaders` exactly as returned when sending the PUT request to
-`uploadUrl`. These headers are part of the pre-signed URL signature.
+`uploadUrl`. These headers and the requested `contentLength` are part of the
+pre-signed URL signature.
+Keep `resultUploadGrant` for the matching result upload request.
 
 ### POST /api/presign-result
 
 Request:
 ```json
 {
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadGrant": "signed-result-upload-grant",
+  "contentLength": 4096
 }
 ```
 
@@ -251,12 +259,16 @@ Response:
   "uploadHeaders": {
     "Content-Type": "application/json"
   },
-  "key": "results/uuid.json"
+  "contentLength": 4096,
+  "key": "results/uuid.json",
+  "maxUploadBytes": 1048576
 }
 ```
 
 Use `uploadHeaders` exactly as returned when sending the PUT request to
-`uploadUrl`. These headers are part of the pre-signed URL signature.
+`uploadUrl`. These headers and the requested `contentLength` are part of the
+pre-signed URL signature.
+The `resultUploadGrant` must come from the matching image presign response.
 
 ## Technical Details
 

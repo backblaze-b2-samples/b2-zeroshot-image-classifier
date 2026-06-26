@@ -572,6 +572,7 @@
         let imageUrl = null;
         let imageObjectUrl = null;
         let fileId = null;
+        let resultUploadGrant = null;
         let clipPipeline = null;
         let imageUploaded = false;
 
@@ -694,6 +695,11 @@
             }
 
             selectedFile = file;
+            imageUploaded = false;
+            imageUrl = null;
+            fileId = null;
+            resultUploadGrant = null;
+            updateClassifyButton();
 
             // Show image preview
             if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
@@ -719,7 +725,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         filename: selectedFile.name,
-                        contentType: selectedFile.type
+                        contentType: selectedFile.type,
+                        contentLength: selectedFile.size
                     })
                 });
 
@@ -731,9 +738,11 @@
                     uploadUrl,
                     publicUrl,
                     fileId: id,
+                    resultUploadGrant: grant,
                     uploadHeaders = { 'Content-Type': selectedFile.type }
                 } = await response.json();
                 fileId = id;
+                resultUploadGrant = grant;
 
                 setProgress(PROGRESS.PRESIGN_DONE);
 
@@ -830,11 +839,26 @@
                 setProgress(PROGRESS.SAVING);
                 showStatus('Saving results to B2...', 'info');
 
+                const resultData = {
+                    imageSource: imageUrl,
+                    filename: selectedFile.name,
+                    labels: labels,
+                    classifications: classifications,
+                    model: 'Xenova/clip-vit-base-patch32',
+                    timestamp: new Date().toISOString()
+                };
+                const resultBody = JSON.stringify(resultData);
+                const resultContentLength = new Blob([resultBody]).size;
+
                 // Get pre-signed URL for result
                 const presignResponse = await fetchWithTimeout(`${API_BASE}/api/presign-result`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ fileId })
+                    body: JSON.stringify({
+                        fileId,
+                        resultUploadGrant,
+                        contentLength: resultContentLength
+                    })
                 });
 
                 if (!presignResponse.ok) {
@@ -848,19 +872,10 @@
                 } = await presignResponse.json();
 
                 // Upload result to B2
-                const resultData = {
-                    imageSource: imageUrl,
-                    filename: selectedFile.name,
-                    labels: labels,
-                    classifications: classifications,
-                    model: 'Xenova/clip-vit-base-patch32',
-                    timestamp: new Date().toISOString()
-                };
-
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
                     method: 'PUT',
                     headers: resultUploadHeaders,
-                    body: JSON.stringify(resultData)
+                    body: resultBody
                 }, 120000);
 
                 if (!resultUploadResponse.ok) {

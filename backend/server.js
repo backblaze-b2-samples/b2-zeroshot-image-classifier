@@ -7,9 +7,12 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { setupCORS } from './setup-cors.js';
 import {
+  createResultUploadGrant,
   generatePresignedUrls as createPresignedUrls,
   getAllowedImageExtension,
   normalizeImageContentType,
+  validateUploadContentLength,
+  verifyResultUploadGrant,
 } from './presign.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,8 +53,27 @@ const s3Client = new S3Client({
 
 const BUCKET = process.env.B2_BUCKET;
 
-// Configurable URL expiry
-const URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
+function getPositiveIntEnv(name, fallback) {
+  const parsed = parseInt(process.env[name], 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+// Configurable upload policy
+const URL_EXPIRY = getPositiveIntEnv('URL_EXPIRY', 3600);
+const MAX_IMAGE_UPLOAD_BYTES = getPositiveIntEnv(
+  'MAX_IMAGE_UPLOAD_BYTES',
+  10 * 1024 * 1024
+);
+const MAX_RESULT_UPLOAD_BYTES = getPositiveIntEnv(
+  'MAX_RESULT_UPLOAD_BYTES',
+  1024 * 1024
+);
+const PRESIGN_RATE_LIMIT_WINDOW_MS = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_WINDOW_MS',
+  60 * 1000
+);
+const PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv('PRESIGN_RATE_LIMIT_MAX', 60);
+const RESULT_GRANT_SECRET = process.env.RESULT_GRANT_SECRET || process.env.B2_APP_KEY;
 
 // Robust boolean parsing for AUTO_SETUP_CORS
 const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
@@ -60,21 +82,49 @@ const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function createRateLimiter({ windowMs, maxRequests }) {
+  const clients = new Map();
+
+  return (req, res, next) => {
+    const now = Date.now();
+    const clientKey = req.ip || req.socket.remoteAddress || 'unknown';
+    const current = clients.get(clientKey);
+
+    if (!current || current.resetAt <= now) {
+      clients.set(clientKey, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (current.count >= maxRequests) {
+      return res.status(429).json({ error: 'Too many presign requests' });
+    }
+
+    current.count += 1;
+    return next();
+  };
+}
+
+const presignRateLimiter = createRateLimiter({
+  windowMs: PRESIGN_RATE_LIMIT_WINDOW_MS,
+  maxRequests: PRESIGN_RATE_LIMIT_MAX,
+});
+
 // Shared presign helper
-async function generatePresignedUrls(key, contentType) {
+async function generatePresignedUrls(key, contentType, contentLength) {
   return createPresignedUrls({
     s3Client,
     bucket: BUCKET,
     key,
     contentType,
+    contentLength,
     expiresIn: URL_EXPIRY,
   });
 }
 
 // Generate pre-signed PUT URL for image upload
-app.post('/api/presign-image', async (req, res) => {
+app.post('/api/presign-image', presignRateLimiter, async (req, res) => {
   try {
-    const { filename, contentType } = req.body;
+    const { filename, contentType, contentLength } = req.body;
 
     // Input validation
     if (!filename || typeof filename !== 'string') {
@@ -89,15 +139,40 @@ app.post('/api/presign-image', async (req, res) => {
     if (!uploadContentType) {
       return res.status(400).json({ error: 'Invalid content type' });
     }
+    const uploadContentLength = validateUploadContentLength(
+      contentLength,
+      MAX_IMAGE_UPLOAD_BYTES
+    );
+    if (!uploadContentLength) {
+      return res.status(400).json({ error: 'Invalid or oversized image upload' });
+    }
 
     const fileId = randomUUID();
     const key = `images/${fileId}.${ext}`;
     const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
       key,
-      uploadContentType
+      uploadContentType,
+      uploadContentLength
     );
+    const resultUploadGrant = createResultUploadGrant({
+      fileId,
+      secret: RESULT_GRANT_SECRET,
+      ttlSeconds: URL_EXPIRY,
+    });
+    if (!resultUploadGrant) {
+      return res.status(500).json({ error: 'Failed to create result upload grant' });
+    }
 
-    res.json({ uploadUrl, publicUrl, uploadHeaders, key, fileId });
+    res.json({
+      uploadUrl,
+      publicUrl,
+      uploadHeaders,
+      contentLength: uploadContentLength,
+      key,
+      fileId,
+      resultUploadGrant,
+      maxUploadBytes: MAX_IMAGE_UPLOAD_BYTES,
+    });
   } catch (error) {
     console.error('Error generating image presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
@@ -105,22 +180,45 @@ app.post('/api/presign-image', async (req, res) => {
 });
 
 // Generate pre-signed PUT URL for result upload
-app.post('/api/presign-result', async (req, res) => {
+app.post('/api/presign-result', presignRateLimiter, async (req, res) => {
   try {
-    const { fileId } = req.body;
+    const { fileId, resultUploadGrant, contentLength } = req.body;
 
     // Validate fileId is a UUID
     if (!fileId || !UUID_RE.test(fileId)) {
       return res.status(400).json({ error: 'Invalid file ID' });
     }
+    const grant = verifyResultUploadGrant({
+      grant: resultUploadGrant,
+      fileId,
+      secret: RESULT_GRANT_SECRET,
+    });
+    if (!grant) {
+      return res.status(403).json({ error: 'Invalid result upload grant' });
+    }
+    const uploadContentLength = validateUploadContentLength(
+      contentLength,
+      MAX_RESULT_UPLOAD_BYTES
+    );
+    if (!uploadContentLength) {
+      return res.status(400).json({ error: 'Invalid or oversized result upload' });
+    }
 
     const key = `results/${fileId}.json`;
     const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
       key,
-      'application/json'
+      'application/json',
+      uploadContentLength
     );
 
-    res.json({ uploadUrl, publicUrl, uploadHeaders, key });
+    res.json({
+      uploadUrl,
+      publicUrl,
+      uploadHeaders,
+      contentLength: uploadContentLength,
+      key,
+      maxUploadBytes: MAX_RESULT_UPLOAD_BYTES,
+    });
   } catch (error) {
     console.error('Error generating result presigned URL:', error);
     res.status(500).json({ error: 'Failed to generate presigned URL' });
