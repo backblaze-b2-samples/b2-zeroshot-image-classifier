@@ -237,7 +237,9 @@ Response:
 
 Use `uploadHeaders` exactly as returned when sending the PUT request to
 `uploadUrl`. These headers and the requested `contentLength` are part of the
-pre-signed URL signature.
+pre-signed URL signature. Browsers set `Content-Length` automatically from the
+request body; non-browser clients must send `Content-Length` equal to
+`contentLength`.
 Keep `resultUploadGrant` for the matching result upload request.
 
 ### POST /api/presign-result
@@ -267,7 +269,9 @@ Response:
 
 Use `uploadHeaders` exactly as returned when sending the PUT request to
 `uploadUrl`. These headers and the requested `contentLength` are part of the
-pre-signed URL signature.
+pre-signed URL signature. Browsers set `Content-Length` automatically from the
+request body; non-browser clients must send `Content-Length` equal to
+`contentLength`.
 The `resultUploadGrant` must come from the matching image presign response.
 
 ## Technical Details
