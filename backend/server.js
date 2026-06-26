@@ -101,7 +101,7 @@ function createRateLimiter({ windowMs, maxRequests, maxClients }) {
 
   return (req, res, next) => {
     const now = Date.now();
-    const clientKey = req.ip || req.socket.remoteAddress || 'unknown';
+    const clientKey = req.socket.remoteAddress || req.ip || 'unknown';
     const current = clients.get(clientKey);
 
     if (now - lastCleanup >= windowMs) {
