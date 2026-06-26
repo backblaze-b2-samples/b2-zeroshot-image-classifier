@@ -1,18 +1,17 @@
 import express from 'express';
 import cors from 'cors';
-import { S3Client, HeadBucketCommand } from '@aws-sdk/client-s3';
+import { HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
-import { randomUUID } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { buildPublicUrl, createB2S3Client } from './b2-config.js';
 import { setupCORS } from './setup-cors.js';
 import {
-  createResultUploadGrant,
   generatePresignedUrls as createPresignedUrls,
   getAllowedImageExtension,
   normalizeImageContentType,
   validateUploadContentLength,
-  verifyResultUploadGrant,
 } from './presign.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,71 +19,45 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
-// Validate required env vars at startup
-const REQUIRED_ENV = ['B2_ENDPOINT', 'B2_KEY_ID', 'B2_APP_KEY', 'B2_BUCKET'];
-const missing = REQUIRED_ENV.filter((key) => !process.env[key]);
-if (missing.length > 0) {
-  console.error(`Missing required environment variables: ${missing.join(', ')}`);
-  console.error('Copy backend/.env.example to backend/.env and fill in your credentials.');
-  process.exit(1);
-}
-
-const app = express();
-
-// Configurable CORS origin
-app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
-
-// Limit request body size (presign payloads are tiny)
-app.use(express.json({ limit: '1kb' }));
-
-// Serve frontend files
-app.use(express.static(path.join(__dirname, '../frontend')));
-
-const s3Client = new S3Client({
-  endpoint: process.env.B2_ENDPOINT,
-  region: process.env.B2_REGION || 'us-west-002',
-  credentials: {
-    accessKeyId: process.env.B2_KEY_ID,
-    secretAccessKey: process.env.B2_APP_KEY,
-  },
-  forcePathStyle: true,
-  customUserAgent: "b2ai-clip-classifier",
-});
-
-const BUCKET = process.env.B2_BUCKET;
-
 function getPositiveIntEnv(name, fallback) {
   const parsed = parseInt(process.env[name], 10);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-// Configurable upload policy
-const URL_EXPIRY = getPositiveIntEnv('URL_EXPIRY', 3600);
-const MAX_IMAGE_UPLOAD_BYTES = getPositiveIntEnv(
+const DEFAULT_URL_EXPIRY = getPositiveIntEnv('URL_EXPIRY', 3600);
+const DEFAULT_MAX_IMAGE_UPLOAD_BYTES = getPositiveIntEnv(
   'MAX_IMAGE_UPLOAD_BYTES',
   10 * 1024 * 1024
 );
-const MAX_RESULT_UPLOAD_BYTES = getPositiveIntEnv(
+const DEFAULT_MAX_RESULT_UPLOAD_BYTES = getPositiveIntEnv(
   'MAX_RESULT_UPLOAD_BYTES',
   1024 * 1024
 );
-const PRESIGN_RATE_LIMIT_WINDOW_MS = getPositiveIntEnv(
+const DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS = getPositiveIntEnv(
   'PRESIGN_RATE_LIMIT_WINDOW_MS',
   60 * 1000
 );
-const PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv('PRESIGN_RATE_LIMIT_MAX', 60);
-const PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
+const DEFAULT_PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_MAX',
+  60
+);
+const DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
   'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
   10000
 );
-const RESULT_GRANT_SECRET = process.env.RESULT_GRANT_SECRET || process.env.B2_APP_KEY;
-
-// Robust boolean parsing for AUTO_SETUP_CORS
-const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
-  (process.env.AUTO_SETUP_CORS || '').toLowerCase()
-);
-
+const RESULT_GRANT_PREFIX = '_result-upload-grants';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function readAutoSetupCors() {
+  return !['false', '0', 'no'].includes(
+    (process.env.AUTO_SETUP_CORS || '').toLowerCase()
+  );
+}
+
+function logB2ConfigError(error) {
+  console.error(error.message);
+  console.error('Copy .env.example to .env and fill in your B2 credentials.');
+}
 
 function createRateLimiter({ windowMs, maxRequests, maxClients }) {
   const clients = new Map();
@@ -129,144 +102,330 @@ function createRateLimiter({ windowMs, maxRequests, maxClients }) {
   };
 }
 
-const presignRateLimiter = createRateLimiter({
-  windowMs: PRESIGN_RATE_LIMIT_WINDOW_MS,
-  maxRequests: PRESIGN_RATE_LIMIT_MAX,
-  maxClients: PRESIGN_RATE_LIMIT_MAX_CLIENTS,
-});
+export function createApp({
+  b2: initialB2,
+  urlExpiry = DEFAULT_URL_EXPIRY,
+  autoSetupCors = readAutoSetupCors(),
+  maxImageUploadBytes = DEFAULT_MAX_IMAGE_UPLOAD_BYTES,
+  maxResultUploadBytes = DEFAULT_MAX_RESULT_UPLOAD_BYTES,
+  presignRateLimitWindowMs = DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS,
+  presignRateLimitMax = DEFAULT_PRESIGN_RATE_LIMIT_MAX,
+  presignRateLimitMaxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS,
+} = {}) {
+  const app = express();
+  let b2 = initialB2;
 
-// Shared presign helper
-async function generatePresignedUrls(key, contentType, contentLength) {
-  return createPresignedUrls({
-    s3Client,
-    bucket: BUCKET,
-    key,
-    contentType,
-    contentLength,
-    expiresIn: URL_EXPIRY,
+  function getB2() {
+    if (!b2) {
+      b2 = createB2S3Client();
+    }
+    return b2;
+  }
+
+  function issueResultUploadToken(fileId) {
+    const exp = Date.now() + urlExpiry * 1000;
+    const nonce = randomBytes(16).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ fileId, exp, nonce })).toString('base64url');
+    const signature = createHmac('sha256', getB2().applicationKey).update(payload).digest('base64url');
+
+    return `${payload}.${signature}`;
+  }
+
+  function verifyResultUploadToken(fileId, resultUploadToken) {
+    if (!resultUploadToken || typeof resultUploadToken !== 'string') {
+      return null;
+    }
+
+    const tokenParts = resultUploadToken.split('.');
+    if (tokenParts.length !== 2) {
+      return null;
+    }
+
+    const [payload, signature] = tokenParts;
+    if (!payload || !signature) {
+      return null;
+    }
+
+    const expectedSignature = createHmac('sha256', getB2().applicationKey).update(payload).digest('base64url');
+    const signatureBuffer = Buffer.from(signature);
+    const expectedBuffer = Buffer.from(expectedSignature);
+
+    if (signatureBuffer.length !== expectedBuffer.length || !timingSafeEqual(signatureBuffer, expectedBuffer)) {
+      return null;
+    }
+
+    try {
+      const tokenPayload = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+      const validPayload = tokenPayload.fileId === fileId &&
+        typeof tokenPayload.nonce === 'string' &&
+        Number.isFinite(tokenPayload.exp) &&
+        tokenPayload.exp > Date.now();
+      return validPayload ? tokenPayload : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function legacyActiveGrantKey(fileId) {
+    return `${RESULT_GRANT_PREFIX}/legacy-active/${fileId}.json`;
+  }
+
+  function fileUsedGrantKey(fileId) {
+    return `${RESULT_GRANT_PREFIX}/file-used/${fileId}.json`;
+  }
+
+  function isMissingObjectError(error) {
+    return error?.$metadata?.httpStatusCode === 404 ||
+      error?.name === 'NotFound' ||
+      error?.Code === 'NotFound' ||
+      error?.Code === 'NoSuchKey';
+  }
+
+  function isPreconditionFailed(error) {
+    return error?.$metadata?.httpStatusCode === 412 ||
+      error?.name === 'PreconditionFailed' ||
+      error?.Code === 'PreconditionFailed';
+  }
+
+  async function getGrantMarkerMetadata(key) {
+    const { s3Client, bucketName: bucket } = getB2();
+    try {
+      const response = await s3Client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return response.Metadata || {};
+    } catch (error) {
+      if (isMissingObjectError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  async function createGrantMarker(key, metadata) {
+    const { s3Client, bucketName: bucket } = getB2();
+    try {
+      await s3Client.send(new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ContentType: 'application/json',
+        Body: JSON.stringify(metadata),
+        Metadata: Object.fromEntries(
+          Object.entries(metadata).map(([metadataKey, value]) => [metadataKey, String(value)])
+        ),
+        IfNoneMatch: '*',
+      }));
+      return true;
+    } catch (error) {
+      if (isPreconditionFailed(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  async function generatePresignedUrls(key, contentType, contentLength) {
+    const { s3Client, bucketName: bucket, publicUrlBase } = getB2();
+    const signedUrls = await createPresignedUrls({
+      s3Client,
+      bucket,
+      key,
+      contentType,
+      contentLength,
+      expiresIn: urlExpiry,
+    });
+    const publicUrl = buildPublicUrl(publicUrlBase, key);
+
+    if (publicUrl) {
+      return {
+        ...signedUrls,
+        publicUrl,
+        urlType: 'public',
+        expiresIn: null,
+      };
+    }
+
+    return {
+      ...signedUrls,
+      urlType: 'signed',
+      expiresIn: urlExpiry,
+    };
+  }
+
+  const presignRateLimiter = createRateLimiter({
+    windowMs: presignRateLimitWindowMs,
+    maxRequests: presignRateLimitMax,
+    maxClients: presignRateLimitMaxClients,
   });
+
+  app.locals.getB2 = getB2;
+  app.locals.autoSetupCors = autoSetupCors;
+
+  app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
+  app.use(express.json({ limit: '1kb' }));
+  app.use(express.static(path.join(__dirname, '../frontend')));
+
+  app.post('/api/presign-image', presignRateLimiter, async (req, res) => {
+    try {
+      const { filename, contentType, contentLength } = req.body;
+
+      if (!filename || typeof filename !== 'string') {
+        return res.status(400).json({ error: 'Missing or invalid filename' });
+      }
+
+      const ext = getAllowedImageExtension(filename);
+      if (!ext) {
+        return res.status(400).json({ error: 'Unsupported image format' });
+      }
+
+      const uploadContentType = normalizeImageContentType(ext, contentType);
+      if (!uploadContentType) {
+        return res.status(400).json({ error: 'Invalid content type' });
+      }
+
+      const uploadContentLength = validateUploadContentLength(
+        contentLength,
+        maxImageUploadBytes
+      );
+      if (!uploadContentLength) {
+        return res.status(400).json({ error: 'Invalid or oversized image upload' });
+      }
+
+      const fileId = randomUUID();
+      const key = `images/${fileId}.${ext}`;
+      const {
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+      } = await generatePresignedUrls(key, uploadContentType, uploadContentLength);
+      const resultUploadToken = issueResultUploadToken(fileId);
+      const legacyGrantCreated = await createGrantMarker(legacyActiveGrantKey(fileId), {
+        fileId,
+        exp: Date.now() + urlExpiry * 1000,
+        createdAt: new Date().toISOString(),
+      });
+      if (!legacyGrantCreated) {
+        return res.status(409).json({ error: 'File ID collision, please retry' });
+      }
+
+      res.json({
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+        key,
+        fileId,
+        resultUploadToken,
+        resultUploadTokenExpiresIn: urlExpiry,
+        maxUploadBytes: maxImageUploadBytes,
+      });
+    } catch (error) {
+      console.error('Error generating image presigned URL:', error);
+      res.status(500).json({ error: 'Failed to generate presigned URL' });
+    }
+  });
+
+  app.post('/api/presign-result', presignRateLimiter, async (req, res) => {
+    try {
+      const { fileId, resultUploadToken, contentLength } = req.body;
+
+      if (!fileId || !UUID_RE.test(fileId)) {
+        return res.status(400).json({ error: 'Invalid file ID' });
+      }
+
+      const uploadContentLength = validateUploadContentLength(
+        contentLength,
+        maxResultUploadBytes
+      );
+      if (!uploadContentLength) {
+        return res.status(400).json({ error: 'Invalid or oversized result upload' });
+      }
+
+      const tokenPayload = resultUploadToken ? verifyResultUploadToken(fileId, resultUploadToken) : null;
+      const legacy = !resultUploadToken;
+      const legacyMetadata = legacy ? await getGrantMarkerMetadata(legacyActiveGrantKey(fileId)) : null;
+      if (!legacy && !tokenPayload) {
+        return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
+      }
+      if (legacy && (!legacyMetadata || Number(legacyMetadata.exp) <= Date.now())) {
+        return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
+      }
+
+      const key = legacy ? `results/${fileId}.json` : `results/${fileId}/${randomUUID()}.json`;
+      const {
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+      } = await generatePresignedUrls(key, 'application/json', uploadContentLength);
+      const finalized = legacy
+        ? await createGrantMarker(fileUsedGrantKey(fileId), { fileId, usedAt: new Date().toISOString() })
+        : await createGrantMarker(fileUsedGrantKey(fileId), {
+          fileId,
+          nonce: tokenPayload.nonce,
+          exp: tokenPayload.exp,
+          usedAt: new Date().toISOString(),
+        });
+      if (!finalized) {
+        return res.status(403).json({ error: 'Invalid, expired, or already used result upload token' });
+      }
+
+      if (legacy) {
+        res.set('Deprecation', 'true');
+      }
+
+      res.json({
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+        key,
+        maxUploadBytes: maxResultUploadBytes,
+        ...(legacy ? { deprecation: 'resultUploadToken will be required in a future release' } : {}),
+      });
+    } catch (error) {
+      console.error('Error generating result presigned URL:', error);
+      res.status(500).json({ error: 'Failed to generate presigned URL' });
+    }
+  });
+
+  app.get('/health', async (req, res) => {
+    try {
+      const { s3Client, bucketName: bucket } = getB2();
+      await s3Client.send(new HeadBucketCommand({ Bucket: bucket }));
+      res.json({ status: 'ok' });
+    } catch (error) {
+      console.error('Health check failed:', error);
+      res.status(503).json({ status: 'degraded' });
+    }
+  });
+
+  return app;
 }
 
-// Generate pre-signed PUT URL for image upload
-app.post('/api/presign-image', presignRateLimiter, async (req, res) => {
-  try {
-    const { filename, contentType, contentLength } = req.body;
-
-    // Input validation
-    if (!filename || typeof filename !== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid filename' });
-    }
-    const ext = getAllowedImageExtension(filename);
-    if (!ext) {
-      return res.status(400).json({ error: 'Unsupported image format' });
-    }
-
-    const uploadContentType = normalizeImageContentType(ext, contentType);
-    if (!uploadContentType) {
-      return res.status(400).json({ error: 'Invalid content type' });
-    }
-    const uploadContentLength = validateUploadContentLength(
-      contentLength,
-      MAX_IMAGE_UPLOAD_BYTES
-    );
-    if (!uploadContentLength) {
-      return res.status(400).json({ error: 'Invalid or oversized image upload' });
-    }
-
-    const fileId = randomUUID();
-    const key = `images/${fileId}.${ext}`;
-    const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
-      key,
-      uploadContentType,
-      uploadContentLength
-    );
-    const resultUploadGrant = createResultUploadGrant({
-      fileId,
-      secret: RESULT_GRANT_SECRET,
-      ttlSeconds: URL_EXPIRY,
-    });
-    if (!resultUploadGrant) {
-      return res.status(500).json({ error: 'Failed to create result upload grant' });
-    }
-
-    res.json({
-      uploadUrl,
-      publicUrl,
-      uploadHeaders,
-      contentLength: uploadContentLength,
-      key,
-      fileId,
-      resultUploadGrant,
-      maxUploadBytes: MAX_IMAGE_UPLOAD_BYTES,
-    });
-  } catch (error) {
-    console.error('Error generating image presigned URL:', error);
-    res.status(500).json({ error: 'Failed to generate presigned URL' });
-  }
-});
-
-// Generate pre-signed PUT URL for result upload
-app.post('/api/presign-result', presignRateLimiter, async (req, res) => {
-  try {
-    const { fileId, resultUploadGrant, contentLength } = req.body;
-
-    // Validate fileId is a UUID
-    if (!fileId || !UUID_RE.test(fileId)) {
-      return res.status(400).json({ error: 'Invalid file ID' });
-    }
-    const grant = verifyResultUploadGrant({
-      grant: resultUploadGrant,
-      fileId,
-      secret: RESULT_GRANT_SECRET,
-    });
-    if (!grant) {
-      return res.status(403).json({ error: 'Invalid result upload grant' });
-    }
-    const uploadContentLength = validateUploadContentLength(
-      contentLength,
-      MAX_RESULT_UPLOAD_BYTES
-    );
-    if (!uploadContentLength) {
-      return res.status(400).json({ error: 'Invalid or oversized result upload' });
-    }
-
-    const key = `results/${fileId}.json`;
-    const { uploadUrl, publicUrl, uploadHeaders } = await generatePresignedUrls(
-      key,
-      'application/json',
-      uploadContentLength
-    );
-
-    res.json({
-      uploadUrl,
-      publicUrl,
-      uploadHeaders,
-      contentLength: uploadContentLength,
-      key,
-      maxUploadBytes: MAX_RESULT_UPLOAD_BYTES,
-    });
-  } catch (error) {
-    console.error('Error generating result presigned URL:', error);
-    res.status(500).json({ error: 'Failed to generate presigned URL' });
-  }
-});
-
-// Health check with B2 connectivity verification
-app.get('/health', async (req, res) => {
-  try {
-    await s3Client.send(new HeadBucketCommand({ Bucket: BUCKET }));
-    res.json({ status: 'ok' });
-  } catch (error) {
-    console.error('Health check failed:', error);
-    res.status(503).json({ status: 'degraded' });
-  }
-});
+export const app = createApp();
 
 const PORT = process.env.PORT || 3000;
 
-// Auto-setup CORS on startup
-async function startServer() {
-  if (AUTO_SETUP_CORS) {
+export async function startServer({ serverApp = app, port = PORT, exitOnConfigError = false } = {}) {
+  try {
+    serverApp.locals.getB2();
+  } catch (error) {
+    logB2ConfigError(error);
+    if (exitOnConfigError) {
+      process.exit(1);
+    }
+    throw error;
+  }
+
+  if (serverApp.locals.autoSetupCors) {
     console.log('Checking B2 CORS configuration...');
     try {
       await setupCORS(true);
@@ -292,9 +451,8 @@ async function startServer() {
     }
   }
 
-  // Graceful shutdown
-  const server = app.listen(PORT, () => {
-    console.log(`\nServer running on http://localhost:${PORT}\n`);
+  const server = serverApp.listen(port, () => {
+    console.log(`\nServer running on http://localhost:${port}\n`);
   });
 
   function shutdown() {
@@ -305,6 +463,10 @@ async function startServer() {
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+
+  return server;
 }
 
-startServer();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  startServer({ exitOnConfigError: true });
+}

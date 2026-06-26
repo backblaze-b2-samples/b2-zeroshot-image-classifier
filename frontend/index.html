@@ -550,7 +550,7 @@
                     <a id="resultLink" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center;">View Result JSON</a>
                 </div>
                 <p class="links-hint">
-                    Click links above to access your files (pre-signed URLs valid for 1 hour)
+                    Click links above to access your files
                 </p>
             </div>
         </div>
@@ -572,7 +572,7 @@
         let imageUrl = null;
         let imageObjectUrl = null;
         let fileId = null;
-        let resultUploadGrant = null;
+        let resultUploadToken = null;
         let clipPipeline = null;
         let imageUploaded = false;
 
@@ -612,10 +612,10 @@
             });
         });
 
-        // Enable classify button when both image uploaded and labels entered
+        // Enable classify button only while the uploaded image still has a result upload token.
         function updateClassifyButton() {
             const hasLabels = labelInput.value.trim().split(',').filter(l => l.trim()).length >= 2;
-            classifyBtn.disabled = !(imageUploaded && hasLabels);
+            classifyBtn.disabled = !(imageUploaded && resultUploadToken && hasLabels);
         }
 
         labelInput.addEventListener('input', updateClassifyButton);
@@ -698,7 +698,7 @@
             imageUploaded = false;
             imageUrl = null;
             fileId = null;
-            resultUploadGrant = null;
+            resultUploadToken = null;
             updateClassifyButton();
 
             // Show image preview
@@ -718,6 +718,10 @@
             try {
                 showStatus('Uploading image to B2...', 'info');
                 setProgress(PROGRESS.UPLOAD_START);
+                fileId = null;
+                resultUploadToken = null;
+                imageUploaded = false;
+                updateClassifyButton();
 
                 // Get pre-signed URL for image
                 const response = await fetchWithTimeout(`${API_BASE}/api/presign-image`, {
@@ -738,11 +742,11 @@
                     uploadUrl,
                     publicUrl,
                     fileId: id,
-                    resultUploadGrant: grant,
+                    resultUploadToken: token,
                     uploadHeaders = { 'Content-Type': selectedFile.type }
                 } = await response.json();
                 fileId = id;
-                resultUploadGrant = grant;
+                resultUploadToken = token;
 
                 setProgress(PROGRESS.PRESIGN_DONE);
 
@@ -839,6 +843,10 @@
                 setProgress(PROGRESS.SAVING);
                 showStatus('Saving results to B2...', 'info');
 
+                // Result upload tokens are single-use; require a fresh image upload after one exchange.
+                if (!fileId || !resultUploadToken) {
+                    throw new Error('Missing result upload token. Please upload the image again.');
+                }
                 const resultData = {
                     imageSource: imageUrl,
                     filename: selectedFile.name,
@@ -856,7 +864,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         fileId,
-                        resultUploadGrant,
+                        resultUploadToken,
                         contentLength: resultContentLength
                     })
                 });
@@ -870,6 +878,8 @@
                     publicUrl: resultPublicUrl,
                     uploadHeaders: resultUploadHeaders = { 'Content-Type': 'application/json' }
                 } = await presignResponse.json();
+                resultUploadToken = null;
+                updateClassifyButton();
 
                 // Upload result to B2
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
@@ -893,14 +903,14 @@
                 result.classList.add('show');
 
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
 
             } catch (error) {
                 console.error('Classification error:', error);
                 const msg = error.name === 'AbortError' ? 'Request timed out' : 'Error during classification: ' + error.message;
                 showStatus(msg, 'error');
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
             }
         });
     </script>
