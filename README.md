@@ -73,14 +73,23 @@ cp .env.example .env
 Edit `.env` with your [B2 credentials](https://www.backblaze.com/docs/cloud-storage-enable-backblaze-b2?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples):
 
 ```env
-B2_ENDPOINT=https://s3.us-west-002.backblazeb2.com
-B2_REGION=us-west-002
-B2_KEY_ID=your_key_id_here
-B2_APP_KEY=your_app_key_here
-B2_BUCKET=your-bucket-name
+B2_REGION=your_b2_region
+B2_APPLICATION_KEY_ID=your_application_key_id
+B2_APPLICATION_KEY=your_application_key
+B2_BUCKET_NAME=your-bucket-name
+B2_PUBLIC_URL_BASE=
 ```
 
-> Get your B2 endpoint and region from your [bucket details page](https://secure.backblaze.com/b2_buckets.htm?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
+> Set `B2_REGION` from your bucket details page. The app derives the S3-compatible endpoint as `https://s3.<B2_REGION>.backblazeb2.com`. Set `B2_PUBLIC_URL_BASE` only when your bucket is public or fronted by a CDN; otherwise the app returns pre-signed download URLs.
+
+For rolling deploys from older versions, keep the old and new variable names set until all replicas and rollback targets run this version or later. The new names take precedence and the server logs a deprecation warning when it falls back to an old name.
+
+| Old name | New name |
+| --- | --- |
+| `B2_KEY_ID` | `B2_APPLICATION_KEY_ID` |
+| `B2_APP_KEY` | `B2_APPLICATION_KEY` |
+| `B2_BUCKET` | `B2_BUCKET_NAME` |
+| `B2_ENDPOINT` | `B2_REGION` derives `https://s3.<B2_REGION>.backblazeb2.com` |
 
 ### 3. Start the App
 
@@ -223,17 +232,24 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "urlType": "signed",
+  "expiresIn": 3600,
   "key": "images/uuid.jpg",
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadToken": "unguessable-token",
+  "resultUploadTokenExpiresIn": 3600
 }
 ```
+
+`resultUploadToken` is a one-time signed token required when requesting the matching result upload URL. During the migration window, callers that omit `resultUploadToken` can still request one legacy result upload URL for a `fileId` issued by `/api/presign-image`; that fallback returns `results/<fileId>.json` and a deprecation notice.
 
 ### POST /api/presign-result
 
 Request:
 ```json
 {
-  "fileId": "uuid"
+  "fileId": "uuid",
+  "resultUploadToken": "unguessable-token"
 }
 ```
 
@@ -242,9 +258,14 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
-  "key": "results/uuid.json"
+  "urlType": "signed",
+  "expiresIn": 3600,
+  "key": "results/<fileId>/<randomUUID>.json"
 }
 ```
+
+`urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
+Each token-based result upload URL uses a new server-issued object key under the token's `fileId`, so browser clients can upload with only the `Content-Type: application/json` header and do not need forbidden conditional request headers. A result upload token can be exchanged only once.
 
 ## Technical Details
 
@@ -260,7 +281,7 @@ This example uses the [Xenova/clip-vit-base-patch32](https://huggingface.co/Xeno
 ### Storage
 
 - **Provider**: [Backblaze B2](https://www.backblaze.com/b2/cloud-storage.html?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
-- **API**: S3-compatible API with pre-signed URLs
+- **API**: S3-compatible API with pre-signed URLs and a custom sample user agent
 - **Pricing**: $6/TB/month storage, uploads are FREE
 - **Documentation**: [B2 S3-Compatible API Docs](https://www.backblaze.com/b2/docs/s3_compatible_api.html?utm_source=github&utm_medium=referral&utm_campaign=ai_artifacts&utm_content=imagesamples)
 

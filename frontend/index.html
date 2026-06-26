@@ -550,7 +550,7 @@
                     <a id="resultLink" target="_blank" rel="noopener noreferrer" style="flex: 1; text-align: center;">View Result JSON</a>
                 </div>
                 <p class="links-hint">
-                    Click links above to access your files (pre-signed URLs valid for 1 hour)
+                    Click links above to access your files
                 </p>
             </div>
         </div>
@@ -572,6 +572,7 @@
         let imageUrl = null;
         let imageObjectUrl = null;
         let fileId = null;
+        let resultUploadToken = null;
         let clipPipeline = null;
         let imageUploaded = false;
 
@@ -611,10 +612,10 @@
             });
         });
 
-        // Enable classify button when both image uploaded and labels entered
+        // Enable classify button only while the uploaded image still has a result upload token.
         function updateClassifyButton() {
             const hasLabels = labelInput.value.trim().split(',').filter(l => l.trim()).length >= 2;
-            classifyBtn.disabled = !(imageUploaded && hasLabels);
+            classifyBtn.disabled = !(imageUploaded && resultUploadToken && hasLabels);
         }
 
         labelInput.addEventListener('input', updateClassifyButton);
@@ -712,6 +713,10 @@
             try {
                 showStatus('Uploading image to B2...', 'info');
                 setProgress(PROGRESS.UPLOAD_START);
+                fileId = null;
+                resultUploadToken = null;
+                imageUploaded = false;
+                updateClassifyButton();
 
                 // Get pre-signed URL for image
                 const response = await fetchWithTimeout(`${API_BASE}/api/presign-image`, {
@@ -727,8 +732,9 @@
                     throw new Error('Failed to get pre-signed URL');
                 }
 
-                const { uploadUrl, publicUrl, fileId: id } = await response.json();
+                const { uploadUrl, publicUrl, fileId: id, resultUploadToken: token } = await response.json();
                 fileId = id;
+                resultUploadToken = token;
 
                 setProgress(PROGRESS.PRESIGN_DONE);
 
@@ -826,17 +832,26 @@
                 showStatus('Saving results to B2...', 'info');
 
                 // Get pre-signed URL for result
+                if (!fileId || !resultUploadToken) {
+                    throw new Error('Missing result upload token. Please upload the image again.');
+                }
+
                 const presignResponse = await fetchWithTimeout(`${API_BASE}/api/presign-result`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ fileId })
+                    body: JSON.stringify({ fileId, resultUploadToken })
                 });
 
                 if (!presignResponse.ok) {
                     throw new Error('Failed to get result pre-signed URL');
                 }
 
-                const { uploadUrl: resultUploadUrl, publicUrl: resultPublicUrl } = await presignResponse.json();
+                const {
+                    uploadUrl: resultUploadUrl,
+                    publicUrl: resultPublicUrl
+                } = await presignResponse.json();
+                resultUploadToken = null;
+                updateClassifyButton();
 
                 // Upload result to B2
                 const resultData = {
@@ -869,14 +884,14 @@
                 result.classList.add('show');
 
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
 
             } catch (error) {
                 console.error('Classification error:', error);
                 const msg = error.name === 'AbortError' ? 'Request timed out' : 'Error during classification: ' + error.message;
                 showStatus(msg, 'error');
                 hideProgress();
-                classifyBtn.disabled = false;
+                updateClassifyButton();
             }
         });
     </script>
