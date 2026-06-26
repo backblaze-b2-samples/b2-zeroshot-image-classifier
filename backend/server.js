@@ -73,6 +73,10 @@ const PRESIGN_RATE_LIMIT_WINDOW_MS = getPositiveIntEnv(
   60 * 1000
 );
 const PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv('PRESIGN_RATE_LIMIT_MAX', 60);
+const PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
+  10000
+);
 const RESULT_GRANT_SECRET = process.env.RESULT_GRANT_SECRET || process.env.B2_APP_KEY;
 
 // Robust boolean parsing for AUTO_SETUP_CORS
@@ -82,15 +86,36 @@ const AUTO_SETUP_CORS = !['false', '0', 'no'].includes(
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function createRateLimiter({ windowMs, maxRequests }) {
+function createRateLimiter({ windowMs, maxRequests, maxClients }) {
   const clients = new Map();
+  let lastCleanup = 0;
+
+  function cleanupExpired(now) {
+    for (const [clientKey, current] of clients) {
+      if (current.resetAt <= now) {
+        clients.delete(clientKey);
+      }
+    }
+    lastCleanup = now;
+  }
 
   return (req, res, next) => {
     const now = Date.now();
     const clientKey = req.ip || req.socket.remoteAddress || 'unknown';
     const current = clients.get(clientKey);
 
+    if (now - lastCleanup >= windowMs) {
+      cleanupExpired(now);
+    }
+
     if (!current || current.resetAt <= now) {
+      if (clients.size >= maxClients) {
+        cleanupExpired(now);
+      }
+      if (clients.size >= maxClients) {
+        return res.status(429).json({ error: 'Too many presign clients' });
+      }
+
       clients.set(clientKey, { count: 1, resetAt: now + windowMs });
       return next();
     }
@@ -107,6 +132,7 @@ function createRateLimiter({ windowMs, maxRequests }) {
 const presignRateLimiter = createRateLimiter({
   windowMs: PRESIGN_RATE_LIMIT_WINDOW_MS,
   maxRequests: PRESIGN_RATE_LIMIT_MAX,
+  maxClients: PRESIGN_RATE_LIMIT_MAX_CLIENTS,
 });
 
 // Shared presign helper
