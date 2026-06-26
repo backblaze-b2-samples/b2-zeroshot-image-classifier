@@ -256,7 +256,7 @@ Response:
 ```
 
 Use `uploadHeaders` exactly as returned when sending the PUT request to
-`uploadUrl`.
+`uploadUrl`. These headers are part of the pre-signed URL signature.
 
 ## Technical Details
 
