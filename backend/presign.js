@@ -151,7 +151,7 @@ export function verifyResultUploadGrant({
     parsed.v !== 1 ||
     parsed.fileId !== fileId ||
     !parsed.grantId ||
-    parsed.exp < Math.floor(now / 1000)
+    parsed.exp <= Math.floor(now / 1000)
   ) {
     return null;
   }

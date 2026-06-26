@@ -94,6 +94,10 @@ test('result upload grants are tied to server-issued file IDs', () => {
     null
   );
   assert.equal(
+    verifyResultUploadGrant({ grant, fileId, secret, now: NOW + 3600 * 1000 }),
+    null
+  );
+  assert.equal(
     verifyResultUploadGrant({ grant, fileId, secret, now: NOW })?.grantId,
     'grant-id'
   );
