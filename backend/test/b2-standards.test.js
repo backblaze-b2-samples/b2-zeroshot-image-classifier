@@ -22,6 +22,8 @@ const MANAGED_ENV_KEYS = [
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
 const REGION_TWO = ['us', 'west', '004'].join('-');
+const IMAGE_CONTENT_LENGTH = 1024;
+const RESULT_CONTENT_LENGTH = 512;
 const endpointForRegion = (region) => `https://s3.${region}.backblazeb2.com`;
 
 process.env.B2_APPLICATION_KEY_ID = 'server-key-id';
@@ -254,10 +256,13 @@ async function issueImageToken(filename = 'photo.jpg') {
   const response = await postJson('/api/presign-image', {
     filename,
     contentType: 'image/jpeg',
+    contentLength: IMAGE_CONTENT_LENGTH,
   });
   assert.equal(response.status, 200);
   assert.match(response.body.fileId, /^[0-9a-f-]{36}$/);
   assert.equal(typeof response.body.resultUploadToken, 'string');
+  assert.deepEqual(response.body.uploadHeaders, { 'Content-Type': 'image/jpeg' });
+  assert.equal(response.body.contentLength, IMAGE_CONTENT_LENGTH);
   return response.body;
 }
 
@@ -281,6 +286,7 @@ test('presign-result rejects an unknown result upload token', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: '00000000-0000-4000-8000-000000000000',
     resultUploadToken: 'not-issued',
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(response.status, 403);
@@ -290,6 +296,7 @@ test('presign-result rejects an unknown result upload token', async () => {
 test('presign-result rejects an unknown legacy fileId-only request', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: '00000000-0000-4000-8000-000000000000',
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(response.status, 403);
@@ -302,6 +309,7 @@ test('presign-result rejects a token issued for another fileId', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: second.fileId,
     resultUploadToken: first.resultUploadToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(response.status, 403);
@@ -313,12 +321,14 @@ test('presign-result accepts a valid signed result upload token', async () => {
   const success = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: image.resultUploadToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(success.status, 200);
   assert.equal(success.body.urlType, 'public');
   assert.equal(success.body.expiresIn, null);
-  assert.equal(success.body.uploadHeaders, undefined);
+  assert.deepEqual(success.body.uploadHeaders, { 'Content-Type': 'application/json' });
+  assert.equal(success.body.contentLength, RESULT_CONTENT_LENGTH);
   assert.match(success.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
   assert.match(success.body.uploadUrl, /^https?:\/\//);
   assert.equal(success.body.publicUrl, `${buildPublicUrl('https://cdn.example/classifier', success.body.key)}`);
@@ -331,6 +341,7 @@ test('presign-result accepts token grants across app instances', async () => {
     const success = await postJsonTo(targetBaseUrl, '/api/presign-result', {
       fileId: image.fileId,
       resultUploadToken: image.resultUploadToken,
+      contentLength: RESULT_CONTENT_LENGTH,
     });
 
     assert.equal(success.status, 200);
@@ -342,13 +353,16 @@ test('presign-result accepts a legacy fileId-only request once', async () => {
   const image = await issueImageToken();
   const success = await postJson('/api/presign-result', {
     fileId: image.fileId,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
   const replay = await postJson('/api/presign-result', {
     fileId: image.fileId,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
   const tokenReplay = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: image.resultUploadToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(success.status, 200);
@@ -367,6 +381,7 @@ test('presign-result accepts legacy grants across app instances', async () => {
   await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
     const success = await postJsonTo(targetBaseUrl, '/api/presign-result', {
       fileId: image.fileId,
+      contentLength: RESULT_CONTENT_LENGTH,
     });
 
     assert.equal(success.status, 200);
@@ -379,15 +394,17 @@ test('presign-result rejects replayed result upload tokens', async () => {
   const first = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: image.resultUploadToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
   const second = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: image.resultUploadToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(first.status, 200);
   assert.equal(second.status, 403);
-  assert.equal(first.body.uploadHeaders, undefined);
+  assert.deepEqual(first.body.uploadHeaders, { 'Content-Type': 'application/json' });
   assertNoPresignUrls(second.body);
   assert.match(first.body.key, new RegExp(`^results/${image.fileId}/[0-9a-f-]{36}\\.json$`));
 });
@@ -401,6 +418,7 @@ test('presign-result rejects a tampered signed result upload token', async () =>
   const response = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: tamperedToken,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(response.status, 403);
@@ -412,6 +430,7 @@ test('presign-result rejects tokens with extra segments', async () => {
   const response = await postJson('/api/presign-result', {
     fileId: image.fileId,
     resultUploadToken: `${image.resultUploadToken}.extra`,
+    contentLength: RESULT_CONTENT_LENGTH,
   });
 
   assert.equal(response.status, 403);

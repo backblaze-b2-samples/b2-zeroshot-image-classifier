@@ -695,6 +695,11 @@
             }
 
             selectedFile = file;
+            imageUploaded = false;
+            imageUrl = null;
+            fileId = null;
+            resultUploadToken = null;
+            updateClassifyButton();
 
             // Show image preview
             if (imageObjectUrl) URL.revokeObjectURL(imageObjectUrl);
@@ -724,7 +729,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         filename: selectedFile.name,
-                        contentType: selectedFile.type
+                        contentType: selectedFile.type,
+                        contentLength: selectedFile.size
                     })
                 });
 
@@ -732,7 +738,13 @@
                     throw new Error('Failed to get pre-signed URL');
                 }
 
-                const { uploadUrl, publicUrl, fileId: id, resultUploadToken: token } = await response.json();
+                const {
+                    uploadUrl,
+                    publicUrl,
+                    fileId: id,
+                    resultUploadToken: token,
+                    uploadHeaders = { 'Content-Type': selectedFile.type }
+                } = await response.json();
                 fileId = id;
                 resultUploadToken = token;
 
@@ -741,7 +753,7 @@
                 // Upload image to B2 (120s timeout for large files)
                 const uploadResponse = await fetchWithTimeout(uploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': selectedFile.type },
+                    headers: uploadHeaders,
                     body: selectedFile
                 }, 120000);
 
@@ -831,29 +843,10 @@
                 setProgress(PROGRESS.SAVING);
                 showStatus('Saving results to B2...', 'info');
 
-                // Get pre-signed URL for result
+                // Result upload tokens are single-use; require a fresh image upload after one exchange.
                 if (!fileId || !resultUploadToken) {
                     throw new Error('Missing result upload token. Please upload the image again.');
                 }
-
-                const presignResponse = await fetchWithTimeout(`${API_BASE}/api/presign-result`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ fileId, resultUploadToken })
-                });
-
-                if (!presignResponse.ok) {
-                    throw new Error('Failed to get result pre-signed URL');
-                }
-
-                const {
-                    uploadUrl: resultUploadUrl,
-                    publicUrl: resultPublicUrl
-                } = await presignResponse.json();
-                resultUploadToken = null;
-                updateClassifyButton();
-
-                // Upload result to B2
                 const resultData = {
                     imageSource: imageUrl,
                     filename: selectedFile.name,
@@ -862,11 +855,37 @@
                     model: 'Xenova/clip-vit-base-patch32',
                     timestamp: new Date().toISOString()
                 };
+                const resultBody = JSON.stringify(resultData);
+                const resultContentLength = new Blob([resultBody]).size;
 
+                // Get pre-signed URL for result
+                const presignResponse = await fetchWithTimeout(`${API_BASE}/api/presign-result`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        fileId,
+                        resultUploadToken,
+                        contentLength: resultContentLength
+                    })
+                });
+
+                if (!presignResponse.ok) {
+                    throw new Error('Failed to get result pre-signed URL');
+                }
+
+                const {
+                    uploadUrl: resultUploadUrl,
+                    publicUrl: resultPublicUrl,
+                    uploadHeaders: resultUploadHeaders = { 'Content-Type': 'application/json' }
+                } = await presignResponse.json();
+                resultUploadToken = null;
+                updateClassifyButton();
+
+                // Upload result to B2
                 const resultUploadResponse = await fetchWithTimeout(resultUploadUrl, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(resultData)
+                    headers: resultUploadHeaders,
+                    body: resultBody
                 }, 120000);
 
                 if (!resultUploadResponse.ok) {

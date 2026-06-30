@@ -1,33 +1,57 @@
 import express from 'express';
 import cors from 'cors';
-import { PutObjectCommand, GetObjectCommand, HeadBucketCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { buildPublicUrl, createB2S3Client } from './b2-config.js';
 import { setupCORS } from './setup-cors.js';
+import {
+  generatePresignedUrls as createPresignedUrls,
+  getAllowedImageExtension,
+  normalizeImageContentType,
+  validateUploadContentLength,
+} from './presign.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
-const DEFAULT_URL_EXPIRY = parseInt(process.env.URL_EXPIRY, 10) || 3600;
+function getPositiveIntEnv(name, fallback) {
+  const parsed = parseInt(process.env[name], 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+const DEFAULT_URL_EXPIRY = getPositiveIntEnv('URL_EXPIRY', 3600);
+const DEFAULT_MAX_IMAGE_UPLOAD_BYTES = getPositiveIntEnv(
+  'MAX_IMAGE_UPLOAD_BYTES',
+  10 * 1024 * 1024
+);
+const DEFAULT_MAX_RESULT_UPLOAD_BYTES = getPositiveIntEnv(
+  'MAX_RESULT_UPLOAD_BYTES',
+  1024 * 1024
+);
+const DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_WINDOW_MS',
+  60 * 1000
+);
+const DEFAULT_PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_MAX',
+  60
+);
+const DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
+  10000
+);
 const RESULT_GRANT_PREFIX = '_result-upload-grants';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const IMAGE_MIME_BY_EXT = new Map([
-  ['jpg', ['image/jpeg']],
-  ['jpeg', ['image/jpeg']],
-  ['png', ['image/png']],
-  ['gif', ['image/gif']],
-  ['webp', ['image/webp']],
-  ['bmp', ['image/bmp']],
-]);
 
 function readAutoSetupCors() {
-  return !['false', '0', 'no'].includes((process.env.AUTO_SETUP_CORS || '').toLowerCase());
+  return !['false', '0', 'no'].includes(
+    (process.env.AUTO_SETUP_CORS || '').toLowerCase()
+  );
 }
 
 function logB2ConfigError(error) {
@@ -35,24 +59,58 @@ function logB2ConfigError(error) {
   console.error('Copy .env.example to .env and fill in your B2 credentials.');
 }
 
-function normalizeImageContentType(ext, contentType) {
-  const allowedMimeTypes = IMAGE_MIME_BY_EXT.get(ext);
-  if (!allowedMimeTypes) {
-    return null;
+function createRateLimiter({ windowMs, maxRequests, maxClients }) {
+  const clients = new Map();
+  let lastCleanup = 0;
+
+  function cleanupExpired(now) {
+    for (const [clientKey, current] of clients) {
+      if (current.resetAt <= now) {
+        clients.delete(clientKey);
+      }
+    }
+    lastCleanup = now;
   }
 
-  if (!contentType) {
-    return allowedMimeTypes[0];
-  }
+  return (req, res, next) => {
+    const now = Date.now();
+    const clientKey = req.socket.remoteAddress || req.ip || 'unknown';
+    const current = clients.get(clientKey);
 
-  const normalized = String(contentType).split(';', 1)[0].trim().toLowerCase();
-  return allowedMimeTypes.includes(normalized) ? normalized : null;
+    if (now - lastCleanup >= windowMs) {
+      cleanupExpired(now);
+    }
+
+    if (!current || current.resetAt <= now) {
+      if (clients.size >= maxClients) {
+        cleanupExpired(now);
+      }
+      if (clients.size >= maxClients) {
+        return res.status(429).json({ error: 'Too many presign clients' });
+      }
+
+      clients.set(clientKey, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+
+    if (current.count >= maxRequests) {
+      return res.status(429).json({ error: 'Too many presign requests' });
+    }
+
+    current.count += 1;
+    return next();
+  };
 }
 
 export function createApp({
   b2: initialB2,
   urlExpiry = DEFAULT_URL_EXPIRY,
   autoSetupCors = readAutoSetupCors(),
+  maxImageUploadBytes = DEFAULT_MAX_IMAGE_UPLOAD_BYTES,
+  maxResultUploadBytes = DEFAULT_MAX_RESULT_UPLOAD_BYTES,
+  presignRateLimitWindowMs = DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS,
+  presignRateLimitMax = DEFAULT_PRESIGN_RATE_LIMIT_MAX,
+  presignRateLimitMaxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS,
 } = {}) {
   const app = express();
   let b2 = initialB2;
@@ -65,8 +123,6 @@ export function createApp({
   }
 
   function issueResultUploadToken(fileId) {
-    // HMAC uses the B2 application key as the sample's shared server secret;
-    // rotating that key intentionally invalidates in-flight result tokens.
     const exp = Date.now() + urlExpiry * 1000;
     const nonce = randomBytes(16).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ fileId, exp, nonce })).toString('base64url');
@@ -166,59 +222,84 @@ export function createApp({
     }
   }
 
-  async function generatePresignedUrls(key, contentType) {
+  async function generatePresignedUrls(key, contentType, contentLength) {
     const { s3Client, bucketName: bucket, publicUrlBase } = getB2();
-    const putObjectParams = { Bucket: bucket, Key: key, ContentType: contentType };
-
-    const putUrl = await getSignedUrl(
+    const signedUrls = await createPresignedUrls({
       s3Client,
-      new PutObjectCommand(putObjectParams),
-      { expiresIn: urlExpiry }
-    );
+      bucket,
+      key,
+      contentType,
+      contentLength,
+      expiresIn: urlExpiry,
+    });
     const publicUrl = buildPublicUrl(publicUrlBase, key);
+
     if (publicUrl) {
-      return { uploadUrl: putUrl, publicUrl, urlType: 'public', expiresIn: null };
+      return {
+        ...signedUrls,
+        publicUrl,
+        urlType: 'public',
+        expiresIn: null,
+      };
     }
 
-    const signedUrl = await getSignedUrl(
-      s3Client,
-      new GetObjectCommand({ Bucket: bucket, Key: key }),
-      { expiresIn: urlExpiry }
-    );
-    return { uploadUrl: putUrl, publicUrl: signedUrl, urlType: 'signed', expiresIn: urlExpiry };
+    return {
+      ...signedUrls,
+      urlType: 'signed',
+      expiresIn: urlExpiry,
+    };
   }
+
+  const presignRateLimiter = createRateLimiter({
+    windowMs: presignRateLimitWindowMs,
+    maxRequests: presignRateLimitMax,
+    maxClients: presignRateLimitMaxClients,
+  });
 
   app.locals.getB2 = getB2;
   app.locals.autoSetupCors = autoSetupCors;
 
-  // Configurable CORS origin
   app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
-
-  // Limit request body size (presign payloads are tiny)
   app.use(express.json({ limit: '1kb' }));
-
-  // Serve frontend files
   app.use(express.static(path.join(__dirname, '../frontend')));
 
-  // Generate pre-signed PUT URL for image upload
-  app.post('/api/presign-image', async (req, res) => {
+  app.post('/api/presign-image', presignRateLimiter, async (req, res) => {
     try {
-      const { filename, contentType } = req.body;
+      const { filename, contentType, contentLength } = req.body;
 
-      // Input validation
       if (!filename || typeof filename !== 'string') {
         return res.status(400).json({ error: 'Missing or invalid filename' });
       }
-      const ext = path.extname(filename).replace('.', '').toLowerCase();
-      const normalizedContentType = normalizeImageContentType(ext, contentType);
-      if (!normalizedContentType) {
-        return res.status(400).json({ error: 'Unsupported image format or content type' });
+
+      const ext = getAllowedImageExtension(filename);
+      if (!ext) {
+        return res.status(400).json({ error: 'Unsupported image format' });
+      }
+
+      const uploadContentType = normalizeImageContentType(ext, contentType);
+      if (!uploadContentType) {
+        return res.status(400).json({ error: 'Invalid content type' });
+      }
+
+      const uploadContentLength = validateUploadContentLength(
+        contentLength,
+        maxImageUploadBytes
+      );
+      if (!uploadContentLength) {
+        return res.status(400).json({ error: 'Invalid or oversized image upload' });
       }
 
       const fileId = randomUUID();
-      const resultUploadToken = issueResultUploadToken(fileId);
       const key = `images/${fileId}.${ext}`;
-      const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, normalizedContentType);
+      const {
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+      } = await generatePresignedUrls(key, uploadContentType, uploadContentLength);
+      const resultUploadToken = issueResultUploadToken(fileId);
       const legacyGrantCreated = await createGrantMarker(legacyActiveGrantKey(fileId), {
         fileId,
         exp: Date.now() + urlExpiry * 1000,
@@ -231,12 +312,15 @@ export function createApp({
       res.json({
         uploadUrl,
         publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
         urlType,
         expiresIn,
         key,
         fileId,
         resultUploadToken,
         resultUploadTokenExpiresIn: urlExpiry,
+        maxUploadBytes: maxImageUploadBytes,
       });
     } catch (error) {
       console.error('Error generating image presigned URL:', error);
@@ -244,19 +328,22 @@ export function createApp({
     }
   });
 
-  // Generate pre-signed PUT URL for result upload
-  app.post('/api/presign-result', async (req, res) => {
+  app.post('/api/presign-result', presignRateLimiter, async (req, res) => {
     try {
-      const { fileId, resultUploadToken } = req.body;
+      const { fileId, resultUploadToken, contentLength } = req.body;
 
-      // Validate fileId is a UUID
       if (!fileId || !UUID_RE.test(fileId)) {
         return res.status(400).json({ error: 'Invalid file ID' });
       }
 
-      // Legacy fileId-only grants remain during migration. Their HEAD-then-PUT
-      // marker flow has a narrow TOCTOU window, accepted only for this
-      // deprecated path; signed resultUploadToken grants avoid this race.
+      const uploadContentLength = validateUploadContentLength(
+        contentLength,
+        maxResultUploadBytes
+      );
+      if (!uploadContentLength) {
+        return res.status(400).json({ error: 'Invalid or oversized result upload' });
+      }
+
       const tokenPayload = resultUploadToken ? verifyResultUploadToken(fileId, resultUploadToken) : null;
       const legacy = !resultUploadToken;
       const legacyMetadata = legacy ? await getGrantMarkerMetadata(legacyActiveGrantKey(fileId)) : null;
@@ -268,7 +355,14 @@ export function createApp({
       }
 
       const key = legacy ? `results/${fileId}.json` : `results/${fileId}/${randomUUID()}.json`;
-      const { uploadUrl, publicUrl, urlType, expiresIn } = await generatePresignedUrls(key, 'application/json');
+      const {
+        uploadUrl,
+        publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
+        urlType,
+        expiresIn,
+      } = await generatePresignedUrls(key, 'application/json', uploadContentLength);
       const finalized = legacy
         ? await createGrantMarker(fileUsedGrantKey(fileId), { fileId, usedAt: new Date().toISOString() })
         : await createGrantMarker(fileUsedGrantKey(fileId), {
@@ -288,9 +382,12 @@ export function createApp({
       res.json({
         uploadUrl,
         publicUrl,
+        uploadHeaders,
+        contentLength: signedContentLength,
         urlType,
         expiresIn,
         key,
+        maxUploadBytes: maxResultUploadBytes,
         ...(legacy ? { deprecation: 'resultUploadToken will be required in a future release' } : {}),
       });
     } catch (error) {
@@ -299,7 +396,6 @@ export function createApp({
     }
   });
 
-  // Health check with B2 connectivity verification
   app.get('/health', async (req, res) => {
     try {
       const { s3Client, bucketName: bucket } = getB2();
@@ -318,7 +414,6 @@ export const app = createApp();
 
 const PORT = process.env.PORT || 3000;
 
-// Auto-setup CORS on startup
 export async function startServer({ serverApp = app, port = PORT, exitOnConfigError = false } = {}) {
   try {
     serverApp.locals.getB2();
@@ -356,7 +451,6 @@ export async function startServer({ serverApp = app, port = PORT, exitOnConfigEr
     }
   }
 
-  // Graceful shutdown
   const server = serverApp.listen(port, () => {
     console.log(`\nServer running on http://localhost:${port}\n`);
   });

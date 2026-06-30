@@ -223,7 +223,8 @@ Request:
 ```json
 {
   "filename": "photo.jpg",
-  "contentType": "image/jpeg"
+  "contentType": "image/jpeg",
+  "contentLength": 1048576
 }
 ```
 
@@ -232,16 +233,31 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "uploadHeaders": {
+    "Content-Type": "image/jpeg"
+  },
+  "contentLength": 1048576,
   "urlType": "signed",
   "expiresIn": 3600,
   "key": "images/uuid.jpg",
   "fileId": "uuid",
   "resultUploadToken": "unguessable-token",
-  "resultUploadTokenExpiresIn": 3600
+  "resultUploadTokenExpiresIn": 3600,
+  "maxUploadBytes": 10485760
 }
 ```
 
-`resultUploadToken` is a one-time signed token required when requesting the matching result upload URL. During the migration window, callers that omit `resultUploadToken` can still request one legacy result upload URL for a `fileId` issued by `/api/presign-image`; that fallback returns `results/<fileId>.json` and a deprecation notice.
+Use `uploadHeaders` exactly as returned when sending the PUT request to
+`uploadUrl`. These headers and the requested `contentLength` are part of the
+pre-signed URL signature. Browsers set `Content-Length` automatically from the
+request body; non-browser clients must send `Content-Length` equal to
+`contentLength`.
+
+`resultUploadToken` is a one-time signed token required when requesting the
+matching result upload URL. During the migration window, callers that omit
+`resultUploadToken` can still request one legacy result upload URL for a
+`fileId` issued by `/api/presign-image`; that fallback returns
+`results/<fileId>.json` and a deprecation notice.
 
 ### POST /api/presign-result
 
@@ -249,7 +265,8 @@ Request:
 ```json
 {
   "fileId": "uuid",
-  "resultUploadToken": "unguessable-token"
+  "resultUploadToken": "unguessable-token",
+  "contentLength": 4096
 }
 ```
 
@@ -258,14 +275,26 @@ Response:
 {
   "uploadUrl": "https://...",
   "publicUrl": "https://...",
+  "uploadHeaders": {
+    "Content-Type": "application/json"
+  },
+  "contentLength": 4096,
   "urlType": "signed",
   "expiresIn": 3600,
-  "key": "results/<fileId>/<randomUUID>.json"
+  "key": "results/<fileId>/<randomUUID>.json",
+  "maxUploadBytes": 1048576
 }
 ```
 
+Use `uploadHeaders` exactly as returned when sending the PUT request to
+`uploadUrl`. These headers and the requested `contentLength` are part of the
+pre-signed URL signature. Browsers set `Content-Length` automatically from the
+request body; non-browser clients must send `Content-Length` equal to
+`contentLength`.
+
 `urlType` describes `publicUrl`: `signed` URLs expire after `expiresIn` seconds, while `public` URLs come from `B2_PUBLIC_URL_BASE` and return `expiresIn: null`.
-Each token-based result upload URL uses a new server-issued object key under the token's `fileId`, so browser clients can upload with only the `Content-Type: application/json` header and do not need forbidden conditional request headers. A result upload token can be exchanged only once.
+Each token-based result upload URL uses a new server-issued object key under
+the token's `fileId`. A result upload token can be exchanged only once.
 
 ## Technical Details
 
