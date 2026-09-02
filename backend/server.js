@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import { HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
@@ -41,10 +42,6 @@ const DEFAULT_PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv(
   'PRESIGN_RATE_LIMIT_MAX',
   60
 );
-const DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
-  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
-  10000
-);
 const RESULT_GRANT_PREFIX = '_result-upload-grants';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -54,52 +51,31 @@ function readAutoSetupCors() {
   );
 }
 
+function getCorsOrigin() {
+  const configuredOrigin = process.env.CORS_ORIGIN;
+  if (!configuredOrigin) {
+    return false;
+  }
+
+  const allowedOrigins = configuredOrigin
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .filter((origin) => {
+      try {
+        const parsed = new URL(origin);
+        return ['http:', 'https:'].includes(parsed.protocol);
+      } catch {
+        return false;
+      }
+    });
+
+  return allowedOrigins.length > 0 ? allowedOrigins : false;
+}
+
 function logB2ConfigError(error) {
   console.error(error.message);
   console.error('Copy .env.example to .env and fill in your B2 credentials.');
-}
-
-function createRateLimiter({ windowMs, maxRequests, maxClients }) {
-  const clients = new Map();
-  let lastCleanup = 0;
-
-  function cleanupExpired(now) {
-    for (const [clientKey, current] of clients) {
-      if (current.resetAt <= now) {
-        clients.delete(clientKey);
-      }
-    }
-    lastCleanup = now;
-  }
-
-  return (req, res, next) => {
-    const now = Date.now();
-    const clientKey = req.socket.remoteAddress || req.ip || 'unknown';
-    const current = clients.get(clientKey);
-
-    if (now - lastCleanup >= windowMs) {
-      cleanupExpired(now);
-    }
-
-    if (!current || current.resetAt <= now) {
-      if (clients.size >= maxClients) {
-        cleanupExpired(now);
-      }
-      if (clients.size >= maxClients) {
-        return res.status(429).json({ error: 'Too many presign clients' });
-      }
-
-      clients.set(clientKey, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-
-    if (current.count >= maxRequests) {
-      return res.status(429).json({ error: 'Too many presign requests' });
-    }
-
-    current.count += 1;
-    return next();
-  };
 }
 
 export function createApp({
@@ -110,7 +86,6 @@ export function createApp({
   maxResultUploadBytes = DEFAULT_MAX_RESULT_UPLOAD_BYTES,
   presignRateLimitWindowMs = DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS,
   presignRateLimitMax = DEFAULT_PRESIGN_RATE_LIMIT_MAX,
-  presignRateLimitMaxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS,
 } = {}) {
   const app = express();
   let b2 = initialB2;
@@ -250,16 +225,22 @@ export function createApp({
     };
   }
 
-  const presignRateLimiter = createRateLimiter({
+  const presignRateLimiter = rateLimit({
     windowMs: presignRateLimitWindowMs,
-    maxRequests: presignRateLimitMax,
-    maxClients: presignRateLimitMaxClients,
+    limit: presignRateLimitMax,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many presign requests' },
+    validate: {
+      default: true,
+      xForwardedForHeader: false,
+    },
   });
 
   app.locals.getB2 = getB2;
   app.locals.autoSetupCors = autoSetupCors;
 
-  app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
+  app.use(cors({ origin: getCorsOrigin() }));
   app.use(express.json({ limit: '1kb' }));
   app.use(express.static(path.join(__dirname, '../frontend')));
 

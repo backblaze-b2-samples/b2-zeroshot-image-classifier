@@ -785,29 +785,38 @@
 
         function renderBarChart(classifications) {
             const container = document.getElementById('chartContainer');
-            container.innerHTML = '';
-
-            const topScore = classifications[0]?.score || 0;
+            container.replaceChildren();
 
             classifications.forEach((item, i) => {
                 const pct = (item.score * 100).toFixed(1);
                 const row = document.createElement('div');
                 row.className = 'bar-row';
 
-                row.innerHTML = `
-                    <span class="bar-label" title="${item.label}">${item.label}</span>
-                    <div class="bar-track">
-                        <div class="bar-fill${i === 0 ? ' top' : ''}" style="width: 0%"></div>
-                    </div>
-                    <span class="bar-score">${pct}%</span>
-                `;
+                const label = document.createElement('span');
+                label.className = 'bar-label';
+                label.title = item.label;
+                label.textContent = item.label;
+
+                const track = document.createElement('div');
+                track.className = 'bar-track';
+
+                const fill = document.createElement('div');
+                fill.className = `bar-fill${i === 0 ? ' top' : ''}`;
+                fill.style.width = '0%';
+                track.appendChild(fill);
+
+                const score = document.createElement('span');
+                score.className = 'bar-score';
+                score.textContent = `${pct}%`;
+
+                row.append(label, track, score);
 
                 container.appendChild(row);
 
                 // Animate bar fill
                 requestAnimationFrame(() => {
                     requestAnimationFrame(() => {
-                        row.querySelector('.bar-fill').style.width = pct + '%';
+                        fill.style.width = pct + '%';
                     });
                 });
             });

@@ -17,7 +17,10 @@ const MANAGED_ENV_KEYS = [
   'B2_BUCKET',
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
+  'CORS_ORIGIN',
   'MAX_RESULT_UPLOAD_TOKENS',
+  'PRESIGN_RATE_LIMIT_MAX',
+  'PRESIGN_RATE_LIMIT_WINDOW_MS',
   'PORT',
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
@@ -239,6 +242,16 @@ async function postJsonTo(targetBaseUrl, path, body) {
   };
 }
 
+async function optionsTo(targetBaseUrl, path, origin) {
+  return fetch(`${targetBaseUrl}${path}`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Access-Control-Request-Method': 'POST',
+    },
+  });
+}
+
 async function withStartedApp(testApp, fn) {
   const testServer = testApp.listen(0, '127.0.0.1');
   await once(testServer, 'listening');
@@ -251,6 +264,51 @@ async function withStartedApp(testApp, fn) {
     await once(testServer, 'close');
   }
 }
+
+test('CORS denies cross-origin requests by default', async () => {
+  await withEnv({ CORS_ORIGIN: '' }, async () => {
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const response = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+
+      assert.equal(response.headers.get('access-control-allow-origin'), null);
+    });
+  });
+});
+
+test('CORS allows only configured origins', async () => {
+  await withEnv({
+    CORS_ORIGIN: 'https://app.example, https://admin.example, javascript:alert(1)',
+  }, async () => {
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const allowed = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+      const denied = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://evil.example');
+
+      assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.example');
+      assert.equal(denied.headers.get('access-control-allow-origin'), null);
+    });
+  });
+});
+
+test('presign endpoints are rate-limited', async () => {
+  await withStartedApp(createApp({
+    b2: testB2,
+    presignRateLimitMax: 1,
+    presignRateLimitWindowMs: 60 * 1000,
+  }), async (targetBaseUrl) => {
+    const first = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: 'invalid',
+      contentLength: RESULT_CONTENT_LENGTH,
+    });
+    const second = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: 'invalid',
+      contentLength: RESULT_CONTENT_LENGTH,
+    });
+
+    assert.equal(first.status, 400);
+    assert.equal(second.status, 429);
+    assert.deepEqual(second.body, { error: 'Too many presign requests' });
+  });
+});
 
 async function issueImageToken(filename = 'photo.jpg') {
   const response = await postJson('/api/presign-image', {
