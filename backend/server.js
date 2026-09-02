@@ -1,6 +1,6 @@
 import express from 'express';
 import cors from 'cors';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { MemoryStore } from 'express-rate-limit';
 import { HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
@@ -42,6 +42,10 @@ const DEFAULT_PRESIGN_RATE_LIMIT_MAX = getPositiveIntEnv(
   'PRESIGN_RATE_LIMIT_MAX',
   60
 );
+const DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS = getPositiveIntEnv(
+  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
+  10000
+);
 const RESULT_GRANT_PREFIX = '_result-upload-grants';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -51,7 +55,7 @@ function readAutoSetupCors() {
   );
 }
 
-function getCorsOrigin() {
+export function getCorsOrigin() {
   const configuredOrigin = process.env.CORS_ORIGIN;
   if (!configuredOrigin) {
     return false;
@@ -68,9 +72,48 @@ function getCorsOrigin() {
       } catch {
         return false;
       }
-    });
+    })
+    .map((origin) => new URL(origin).origin);
 
-  return allowedOrigins.length > 0 ? allowedOrigins : false;
+  return allowedOrigins.length > 0 ? [...new Set(allowedOrigins)] : false;
+}
+
+export class BoundedMemoryStore extends MemoryStore {
+  constructor(maxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS) {
+    super();
+    this.maxClients = Number.isSafeInteger(maxClients) && maxClients > 0
+      ? maxClients
+      : DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS;
+  }
+
+  hasClient(key) {
+    return this.current.has(key) || this.previous.has(key);
+  }
+
+  clientCount() {
+    return this.current.size + this.previous.size;
+  }
+
+  evictOldestClient() {
+    const previousKey = this.previous.keys().next().value;
+    if (previousKey !== undefined) {
+      this.previous.delete(previousKey);
+      return;
+    }
+
+    const currentKey = this.current.keys().next().value;
+    if (currentKey !== undefined) {
+      this.current.delete(currentKey);
+    }
+  }
+
+  async increment(key) {
+    if (!this.hasClient(key) && this.clientCount() >= this.maxClients) {
+      this.evictOldestClient();
+    }
+
+    return super.increment(key);
+  }
 }
 
 function logB2ConfigError(error) {
@@ -86,6 +129,7 @@ export function createApp({
   maxResultUploadBytes = DEFAULT_MAX_RESULT_UPLOAD_BYTES,
   presignRateLimitWindowMs = DEFAULT_PRESIGN_RATE_LIMIT_WINDOW_MS,
   presignRateLimitMax = DEFAULT_PRESIGN_RATE_LIMIT_MAX,
+  presignRateLimitMaxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS,
 } = {}) {
   const app = express();
   let b2 = initialB2;
@@ -228,6 +272,7 @@ export function createApp({
   const presignRateLimiter = rateLimit({
     windowMs: presignRateLimitWindowMs,
     limit: presignRateLimitMax,
+    store: new BoundedMemoryStore(presignRateLimitMaxClients),
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many presign requests' },

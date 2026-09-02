@@ -18,6 +18,7 @@ const MANAGED_ENV_KEYS = [
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
   'CORS_ORIGIN',
+  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
   'MAX_RESULT_UPLOAD_TOKENS',
   'PRESIGN_RATE_LIMIT_MAX',
   'PRESIGN_RATE_LIMIT_WINDOW_MS',
@@ -36,7 +37,7 @@ process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
 
-const { createApp } = await import('../server.js');
+const { BoundedMemoryStore, createApp, getCorsOrigin } = await import('../server.js');
 
 async function withEnv(values, fn) {
   const previous = new Map(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -289,6 +290,22 @@ test('CORS allows only configured origins', async () => {
   });
 });
 
+test('CORS configured origins are normalized before matching browser origins', async () => {
+  await withEnv({
+    CORS_ORIGIN: 'https://app.example/, https://admin.example/app',
+  }, async () => {
+    assert.deepEqual(getCorsOrigin(), ['https://app.example', 'https://admin.example']);
+
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const allowed = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+      const admin = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://admin.example');
+
+      assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.example');
+      assert.equal(admin.headers.get('access-control-allow-origin'), 'https://admin.example');
+    });
+  });
+});
+
 test('presign endpoints are rate-limited', async () => {
   await withStartedApp(createApp({
     b2: testB2,
@@ -308,6 +325,24 @@ test('presign endpoints are rate-limited', async () => {
     assert.equal(second.status, 429);
     assert.deepEqual(second.body, { error: 'Too many presign requests' });
   });
+});
+
+test('presign rate-limit store caps tracked client keys', async () => {
+  const store = new BoundedMemoryStore(2);
+  store.init({ windowMs: 60 * 1000 });
+
+  try {
+    await store.increment('client-a');
+    await store.increment('client-b');
+    await store.increment('client-c');
+
+    assert.equal(store.clientCount(), 2);
+    assert.equal(await store.get('client-a'), undefined);
+    assert.equal((await store.get('client-b')).totalHits, 1);
+    assert.equal((await store.get('client-c')).totalHits, 1);
+  } finally {
+    store.shutdown();
+  }
 });
 
 async function issueImageToken(filename = 'photo.jpg') {
