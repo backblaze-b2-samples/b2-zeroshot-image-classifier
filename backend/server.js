@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit, { MemoryStore } from 'express-rate-limit';
 import { HeadBucketCommand, HeadObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
@@ -54,52 +55,70 @@ function readAutoSetupCors() {
   );
 }
 
+export function getCorsOrigin() {
+  const configuredOrigin = process.env.CORS_ORIGIN;
+  if (!configuredOrigin) {
+    return false;
+  }
+
+  const allowedOrigins = configuredOrigin
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .filter((origin) => {
+      try {
+        const parsed = new URL(origin);
+        return ['http:', 'https:'].includes(parsed.protocol);
+      } catch {
+        return false;
+      }
+    })
+    .map((origin) => new URL(origin).origin);
+
+  return allowedOrigins.length > 0 ? [...new Set(allowedOrigins)] : false;
+}
+
+export class BoundedMemoryStore extends MemoryStore {
+  constructor(maxClients = DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS) {
+    super();
+    this.maxClients = Number.isSafeInteger(maxClients) && maxClients > 0
+      ? maxClients
+      : DEFAULT_PRESIGN_RATE_LIMIT_MAX_CLIENTS;
+  }
+
+  hasClient(key) {
+    return this.current.has(key) || this.previous.has(key);
+  }
+
+  clientCount() {
+    return this.current.size + this.previous.size;
+  }
+
+  evictOldestClient() {
+    const previousKey = this.previous.keys().next().value;
+    if (previousKey !== undefined) {
+      this.previous.delete(previousKey);
+      return;
+    }
+
+    const currentKey = this.current.keys().next().value;
+    if (currentKey !== undefined) {
+      this.current.delete(currentKey);
+    }
+  }
+
+  async increment(key) {
+    if (!this.hasClient(key) && this.clientCount() >= this.maxClients) {
+      this.evictOldestClient();
+    }
+
+    return super.increment(key);
+  }
+}
+
 function logB2ConfigError(error) {
   console.error(error.message);
   console.error('Copy .env.example to .env and fill in your B2 credentials.');
-}
-
-function createRateLimiter({ windowMs, maxRequests, maxClients }) {
-  const clients = new Map();
-  let lastCleanup = 0;
-
-  function cleanupExpired(now) {
-    for (const [clientKey, current] of clients) {
-      if (current.resetAt <= now) {
-        clients.delete(clientKey);
-      }
-    }
-    lastCleanup = now;
-  }
-
-  return (req, res, next) => {
-    const now = Date.now();
-    const clientKey = req.socket.remoteAddress || req.ip || 'unknown';
-    const current = clients.get(clientKey);
-
-    if (now - lastCleanup >= windowMs) {
-      cleanupExpired(now);
-    }
-
-    if (!current || current.resetAt <= now) {
-      if (clients.size >= maxClients) {
-        cleanupExpired(now);
-      }
-      if (clients.size >= maxClients) {
-        return res.status(429).json({ error: 'Too many presign clients' });
-      }
-
-      clients.set(clientKey, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-
-    if (current.count >= maxRequests) {
-      return res.status(429).json({ error: 'Too many presign requests' });
-    }
-
-    current.count += 1;
-    return next();
-  };
 }
 
 export function createApp({
@@ -250,16 +269,23 @@ export function createApp({
     };
   }
 
-  const presignRateLimiter = createRateLimiter({
+  const presignRateLimiter = rateLimit({
     windowMs: presignRateLimitWindowMs,
-    maxRequests: presignRateLimitMax,
-    maxClients: presignRateLimitMaxClients,
+    limit: presignRateLimitMax,
+    store: new BoundedMemoryStore(presignRateLimitMaxClients),
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: 'Too many presign requests' },
+    validate: {
+      default: true,
+      xForwardedForHeader: false,
+    },
   });
 
   app.locals.getB2 = getB2;
   app.locals.autoSetupCors = autoSetupCors;
 
-  app.use(cors({ origin: process.env.CORS_ORIGIN || true }));
+  app.use(cors({ origin: getCorsOrigin() }));
   app.use(express.json({ limit: '1kb' }));
   app.use(express.static(path.join(__dirname, '../frontend')));
 

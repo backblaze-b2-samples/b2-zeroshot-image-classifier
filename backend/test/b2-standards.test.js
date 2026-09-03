@@ -17,7 +17,11 @@ const MANAGED_ENV_KEYS = [
   'B2_BUCKET',
   'B2_ENDPOINT',
   'AUTO_SETUP_CORS',
+  'CORS_ORIGIN',
+  'PRESIGN_RATE_LIMIT_MAX_CLIENTS',
   'MAX_RESULT_UPLOAD_TOKENS',
+  'PRESIGN_RATE_LIMIT_MAX',
+  'PRESIGN_RATE_LIMIT_WINDOW_MS',
   'PORT',
 ];
 const REGION_ONE = ['us', 'west', '002'].join('-');
@@ -33,7 +37,7 @@ process.env.B2_REGION = REGION_ONE;
 process.env.B2_PUBLIC_URL_BASE = 'https://cdn.example/classifier';
 process.env.AUTO_SETUP_CORS = 'false';
 
-const { createApp } = await import('../server.js');
+const { BoundedMemoryStore, createApp, getCorsOrigin } = await import('../server.js');
 
 async function withEnv(values, fn) {
   const previous = new Map(MANAGED_ENV_KEYS.map((key) => [key, process.env[key]]));
@@ -239,6 +243,16 @@ async function postJsonTo(targetBaseUrl, path, body) {
   };
 }
 
+async function optionsTo(targetBaseUrl, path, origin) {
+  return fetch(`${targetBaseUrl}${path}`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Access-Control-Request-Method': 'POST',
+    },
+  });
+}
+
 async function withStartedApp(testApp, fn) {
   const testServer = testApp.listen(0, '127.0.0.1');
   await once(testServer, 'listening');
@@ -251,6 +265,85 @@ async function withStartedApp(testApp, fn) {
     await once(testServer, 'close');
   }
 }
+
+test('CORS denies cross-origin requests by default', async () => {
+  await withEnv({ CORS_ORIGIN: '' }, async () => {
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const response = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+
+      assert.equal(response.headers.get('access-control-allow-origin'), null);
+    });
+  });
+});
+
+test('CORS allows only configured origins', async () => {
+  await withEnv({
+    CORS_ORIGIN: 'https://app.example, https://admin.example, javascript:alert(1)',
+  }, async () => {
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const allowed = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+      const denied = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://evil.example');
+
+      assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.example');
+      assert.equal(denied.headers.get('access-control-allow-origin'), null);
+    });
+  });
+});
+
+test('CORS configured origins are normalized before matching browser origins', async () => {
+  await withEnv({
+    CORS_ORIGIN: 'https://app.example/, https://admin.example/app',
+  }, async () => {
+    assert.deepEqual(getCorsOrigin(), ['https://app.example', 'https://admin.example']);
+
+    await withStartedApp(createApp({ b2: testB2 }), async (targetBaseUrl) => {
+      const allowed = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://app.example');
+      const admin = await optionsTo(targetBaseUrl, '/api/presign-image', 'https://admin.example');
+
+      assert.equal(allowed.headers.get('access-control-allow-origin'), 'https://app.example');
+      assert.equal(admin.headers.get('access-control-allow-origin'), 'https://admin.example');
+    });
+  });
+});
+
+test('presign endpoints are rate-limited', async () => {
+  await withStartedApp(createApp({
+    b2: testB2,
+    presignRateLimitMax: 1,
+    presignRateLimitWindowMs: 60 * 1000,
+  }), async (targetBaseUrl) => {
+    const first = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: 'invalid',
+      contentLength: RESULT_CONTENT_LENGTH,
+    });
+    const second = await postJsonTo(targetBaseUrl, '/api/presign-result', {
+      fileId: 'invalid',
+      contentLength: RESULT_CONTENT_LENGTH,
+    });
+
+    assert.equal(first.status, 400);
+    assert.equal(second.status, 429);
+    assert.deepEqual(second.body, { error: 'Too many presign requests' });
+  });
+});
+
+test('presign rate-limit store caps tracked client keys', async () => {
+  const store = new BoundedMemoryStore(2);
+  store.init({ windowMs: 60 * 1000 });
+
+  try {
+    await store.increment('client-a');
+    await store.increment('client-b');
+    await store.increment('client-c');
+
+    assert.equal(store.clientCount(), 2);
+    assert.equal(await store.get('client-a'), undefined);
+    assert.equal((await store.get('client-b')).totalHits, 1);
+    assert.equal((await store.get('client-c')).totalHits, 1);
+  } finally {
+    store.shutdown();
+  }
+});
 
 async function issueImageToken(filename = 'photo.jpg') {
   const response = await postJson('/api/presign-image', {
